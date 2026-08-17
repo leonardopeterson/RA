@@ -4,7 +4,10 @@ import {
 } from '@babylonjs/core';
 import { Activity, OBJECT_INITIAL_POSES, type ObjectId } from './activity';
 import type { UI } from './ui';
-import { TREATMENT_MANIPULATION_SURFACE, WORKSPACE, type TapeZoneName, type Workspace } from './workspace';
+import {
+  TREATMENT_MANIPULATION_SURFACE, WORKSPACE, type BandageZoneName,
+  type TapeZoneName, type Workspace,
+} from './workspace';
 
 const HEIGHT_SMOOTHING_SPEED = 10;
 const ELEVATION_START_DISTANCE = 0.08;
@@ -12,6 +15,13 @@ const ELEVATION_END_DISTANCE = 0.015;
 const MIN_MOVEMENT_DISTANCE = 0.0015;
 const MAX_MOVEMENT_SAMPLE_SECONDS = 0.1;
 const TREATMENT_CONTACT_RADIUS = 0.052;
+
+type BandagePassState =
+  | 'WAIT_RIGHT_START'
+  | 'FRONT_WAIT_CENTER'
+  | 'FRONT_WAIT_LEFT'
+  | 'BACK_WAIT_CENTER'
+  | 'BACK_WAIT_RIGHT';
 
 export class InteractionController {
   private selected?: ObjectId;
@@ -26,6 +36,7 @@ export class InteractionController {
   private poseAnimations = new Set<ObjectId>();
   private tapeStartSide?: 'sideA' | 'sideB';
   private tapeCenterCrossed = false;
+  private bandagePassState: BandagePassState = 'WAIT_RIGHT_START';
 
   constructor(private scene: Scene, private workspace: Workspace, private activity: Activity, private ui: UI) {
     this.highlight = new HighlightLayer('selection-highlight', scene);
@@ -34,6 +45,7 @@ export class InteractionController {
     this.setupDrag('solution-bottle');
     this.setupDrag('gauze');
     this.setupDrag('tape-strip');
+    this.setupDrag('bandage-1');
     this.scene.onBeforeRenderObservable.add(() => this.updateAutomaticHeights());
     this.scene.onPointerObservable.add((pointer) => {
       if (pointer.type !== PointerEventTypes.POINTERPICK || !pointer.pickInfo?.pickedMesh) return;
@@ -84,6 +96,13 @@ export class InteractionController {
       this.resetTapeTraversal();
       if (incomplete) this.ui.notify('Fixação incompleta. Tente novamente.', 'error');
       void this.returnToInitialPose(id);
+    } else if (id === 'bandage-1') {
+      const incomplete = this.bandagePassState !== 'WAIT_RIGHT_START';
+      this.activity.cancelBandagePass();
+      this.resetBandagePass();
+      mesh.visibility = 1;
+      if (incomplete) this.ui.notify('Volta incompleta. Retorne ao lado direito.', 'error');
+      void this.returnBandageToRight();
     } else {
       this.activity.release(id);
       this.targetY.set(id, this.calculateTargetY(id, mesh.position));
@@ -136,7 +155,87 @@ export class InteractionController {
       this.updateDebridement(mesh.position);
     } else if (id === 'tape-strip' && this.activity.step === 4) {
       this.updateTapeApplication(mesh.position);
+    } else if (id === 'bandage-1' && this.activity.step === 5) {
+      this.updateBandageWrapping(mesh.position);
     }
+  }
+
+  private updateBandageWrapping(position: Vector3): void {
+    const bandage = this.workspace.pickables.get('bandage-1')!;
+    const zone = this.bandageZoneAt(position);
+    const backPass = this.bandagePassState === 'BACK_WAIT_CENTER' || this.bandagePassState === 'BACK_WAIT_RIGHT';
+    bandage.visibility = backPass && Math.abs(position.x - this.workspace.bandageZones.center.x) < 0.06 ? 0 : 1;
+
+    switch (this.bandagePassState) {
+      case 'WAIT_RIGHT_START':
+        if (zone !== 'right' || !this.activity.beginBandageWrapping()) return;
+        this.bandagePassState = 'FRONT_WAIT_CENTER';
+        this.ui.notify('Passe pela frente do membro.', 'info');
+        this.refreshSelection('bandage-1');
+        break;
+      case 'FRONT_WAIT_CENTER':
+        if (zone === 'center') this.bandagePassState = 'FRONT_WAIT_LEFT';
+        else if (zone === 'left') this.rejectCurrentBandagePass();
+        break;
+      case 'FRONT_WAIT_LEFT':
+        if (zone === 'right') {
+          this.bandagePassState = 'FRONT_WAIT_CENTER';
+          return;
+        }
+        if (zone !== 'left') return;
+        this.bandagePassState = 'BACK_WAIT_CENTER';
+        this.ui.notify('Agora passe por trás do membro.', 'info');
+        break;
+      case 'BACK_WAIT_CENTER':
+        if (zone === 'center') this.bandagePassState = 'BACK_WAIT_RIGHT';
+        else if (zone === 'right') this.rejectCurrentBandagePass();
+        break;
+      case 'BACK_WAIT_RIGHT':
+        if (zone === 'left') {
+          this.bandagePassState = 'BACK_WAIT_CENTER';
+          return;
+        }
+        if (zone !== 'right') return;
+        this.completeBandageRevolution();
+        break;
+    }
+  }
+
+  private rejectCurrentBandagePass(): void {
+    this.bandagePassState = 'WAIT_RIGHT_START';
+    this.workspace.pickables.get('bandage-1')!.visibility = 1;
+    this.ui.notify('Reinicie a volta pelo lado direito.', 'error');
+  }
+
+  private completeBandageRevolution(): void {
+    const completed = this.activity.completeBandageWrap();
+    const wrap = this.activity.wrapCount;
+    this.workspace.bandageLayerSegments[wrap - 1]?.setEnabled(true);
+    const bandage = this.workspace.pickables.get('bandage-1')!;
+    bandage.visibility = 1;
+    if (completed) {
+      this.drags.get('bandage-1')!.enabled = false;
+      this.currentY.delete('bandage-1');
+      this.targetY.delete('bandage-1');
+      bandage.setEnabled(false);
+      this.resetBandagePass();
+      this.ui.notify('Faixa 1 concluída.', 'success');
+      this.refreshSelection('bandage-1');
+    } else {
+      this.bandagePassState = 'FRONT_WAIT_CENTER';
+      this.ui.notify(`Volta concluída — ${wrap} / 10. Passe pela frente.`, 'success');
+    }
+    this.ui.update(this.activity.snapshot);
+  }
+
+  private bandageZoneAt(position: Vector3): BandageZoneName | undefined {
+    const zones = this.workspace.bandageZones;
+    for (const name of ['right', 'center', 'left'] as const) {
+      const zone = zones[name];
+      if (Math.abs(position.x - zone.x) <= zones.halfWidth
+        && Math.abs(position.z - zone.z) <= zones.halfDepth) return name;
+    }
+    return undefined;
   }
 
   private updateTapeApplication(position: Vector3): void {
@@ -256,6 +355,25 @@ export class InteractionController {
     this.refreshSelection(id);
   }
 
+  private async returnBandageToRight(): Promise<void> {
+    const id: ObjectId = 'bandage-1';
+    const mesh = this.workspace.pickables.get(id)!;
+    this.poseAnimations.add(id);
+    this.refreshSelection(id);
+    this.currentY.delete(id);
+    this.targetY.delete(id);
+    await this.animatePose(
+      mesh,
+      this.workspace.bandageRestartPose,
+      Quaternion.FromEulerAngles(...OBJECT_INITIAL_POSES[id].rotation),
+      520,
+    );
+    this.currentY.set(id, this.workspace.bandageRestartPose.y);
+    this.targetY.set(id, this.workspace.bandageRestartPose.y);
+    this.poseAnimations.delete(id);
+    this.refreshSelection(id);
+  }
+
   private animatePose(mesh: AbstractMesh, targetPosition: Vector3, targetRotation: Quaternion, durationMs: number): Promise<void> {
     const startPosition = mesh.position.clone();
     const startRotation = mesh.rotationQuaternion?.clone()
@@ -301,9 +419,15 @@ export class InteractionController {
     this.tapeCenterCrossed = false;
   }
 
+  private resetBandagePass(): void {
+    this.bandagePassState = 'WAIT_RIGHT_START';
+  }
+
   private calculateTargetY(id: ObjectId, localPosition: Vector3): number {
     const object = this.activity.objects.get(id)!;
     const tableY = WORKSPACE.surfaceY + object.tableOffset;
+    if (id === 'bandage-1'
+      && (this.bandagePassState === 'BACK_WAIT_CENTER' || this.bandagePassState === 'BACK_WAIT_RIGHT')) return tableY;
     const treatmentY = TREATMENT_MANIPULATION_SURFACE.height + object.treatmentOffset;
     return tableY + (treatmentY - tableY) * this.surfaceBlend(localPosition);
   }
@@ -386,6 +510,7 @@ export class InteractionController {
     if (id === 'gauze' && this.activity.step < 3) return 'Conclua o debridamento antes de aplicar a gaze.';
     if (id === 'debrisoft-pad' && this.activity.step === 1) return 'Aplique a solução antes de iniciar o debridamento.';
     if (id === 'tape-strip' && this.activity.step < 4) return 'Aplique a gaze antes de usar o esparadrapo.';
+    if (id === 'bandage-1' && this.activity.step < 5) return 'Conclua a fixação antes de usar a primeira faixa.';
     return 'Esse objeto não é necessário nesta etapa.';
   }
 

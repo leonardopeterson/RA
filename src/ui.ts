@@ -54,21 +54,28 @@ export class UI {
   showPlacement(): void {
     element('step-number').textContent = 'POSICIONAMENTO';
     element('instruction').textContent = 'Aponte para uma superfície e toque para posicionar.';
-    element('progress-label').textContent = '0 / 5';
+    element('progress-label').textContent = '0 / 6';
     element<HTMLElement>('progress-bar').style.width = '0%';
     element('selection-card').classList.add('hidden');
     element('reposition').classList.add('hidden');
   }
 
   update(snapshot: ActivitySnapshot): void {
-    const shownStep = Math.min(snapshot.step + 1, 5);
-    element('step-number').textContent = snapshot.phaseCompleted ? 'PRIMEIRA FASE CONCLUÍDA' : `ETAPA ${shownStep}`;
+    const shownStep = Math.min(snapshot.step + 1, 6);
+    element('step-number').textContent = snapshot.phaseCompleted ? 'PRIMEIRA CAMADA CONCLUÍDA' : `ETAPA ${shownStep}`;
     element('instruction').textContent = snapshot.instruction;
-    element('progress-label').textContent = `${Math.min(snapshot.step, 5)} / 5`;
-    element<HTMLElement>('progress-bar').style.width = `${Math.min(snapshot.step / 5, 1) * 100}%`;
+    element('progress-label').textContent = `${Math.min(snapshot.step, 6)} / 6`;
+    element<HTMLElement>('progress-bar').style.width = `${Math.min(snapshot.step / 6, 1) * 100}%`;
     const counter = element('treatment-counter');
-    counter.classList.toggle('hidden', snapshot.step !== 2);
-    element('counter-value').textContent = `${snapshot.debridementSeconds.toFixed(1)} / ${snapshot.debridementTargetSeconds.toFixed(0)} s`;
+    counter.classList.toggle('hidden', snapshot.step !== 2 && snapshot.step !== 5);
+    const counterLabel = counter.querySelector('span')!;
+    if (snapshot.step === 5) {
+      counterLabel.textContent = 'Faixa 1';
+      element('counter-value').textContent = `Voltas: ${snapshot.wrapCount} / ${snapshot.wrapTarget}`;
+    } else {
+      counterLabel.textContent = 'Debridamento';
+      element('counter-value').textContent = `${snapshot.debridementSeconds.toFixed(1)} / ${snapshot.debridementTargetSeconds.toFixed(0)} s`;
+    }
     element('reposition').classList.remove('hidden');
     element('finish').classList.add('hidden');
   }
@@ -91,6 +98,7 @@ export class UI {
       const labels: Partial<Record<ObjectState, string>> = {
         positioned: 'Posicionado ✓', wet: 'Preparado ✓', applying: 'Aplicando…',
         returned: 'Aplicado ✓', used: 'Utilizado ✓', applied: 'Aplicada ✓',
+        wrapping: 'Em andamento', completed: 'Concluída ✓',
       };
       const status = document.createElement('span'); status.className = 'done-label'; status.textContent = labels[state] ?? 'Aguarde'; actions.append(status);
     }

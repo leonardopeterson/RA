@@ -25,6 +25,16 @@ export interface TapeZones {
   halfDepth: number;
 }
 
+export type BandageZoneName = 'right' | 'center' | 'left';
+
+export interface BandageZones {
+  right: Vector3;
+  center: Vector3;
+  left: Vector3;
+  halfWidth: number;
+  halfDepth: number;
+}
+
 export interface Workspace {
   root: TransformNode;
   placementIndicator: Mesh;
@@ -34,6 +44,9 @@ export interface Workspace {
   solutionZone: Vector3;
   tapeZones: TapeZones;
   tapeSnap: Vector3;
+  bandageZones: BandageZones;
+  bandageRestartPose: Vector3;
+  bandageLayerSegments: Mesh[];
   resetObjects(): void;
 }
 
@@ -138,11 +151,33 @@ export function createWorkspace(scene: Scene): Workspace {
   tape.material = material(scene, 'tape-material', '#e8d6b5', 0.88);
   tag([tape], 'tape-strip');
 
+  const bandage = MeshBuilder.CreateCylinder('bandage-1', { height: 0.055, diameter: 0.05, tessellation: 28 }, scene);
+  bandage.parent = root;
+  bandage.material = material(scene, 'bandage-roll-material', '#f0e6cf', 0.9);
+  tag([bandage], 'bandage-1');
+
+  const layerMaterial = material(scene, 'bandage-layer-1-material', '#eee3cb', 0.94);
+  const bandageLayerSegments = Array.from({ length: 10 }, (_, index) => {
+    const segment = MeshBuilder.CreateTorus(`bandage-layer-1-segment-${index + 1}`, {
+      diameter: 0.147,
+      thickness: 0.012,
+      tessellation: 32,
+    }, scene);
+    segment.parent = root;
+    segment.rotation.x = Math.PI / 2;
+    segment.position.set(-0.09, 0.094, 0.09 - index * 0.02);
+    segment.material = layerMaterial;
+    segment.isPickable = false;
+    segment.setEnabled(false);
+    return segment;
+  });
+
   const pickables = new Map<ObjectId, AbstractMesh>([
     ['debrisoft-pad', debrisoft],
     ['solution-bottle', bottle],
     ['gauze', gauze],
     ['tape-strip', tape],
+    ['bandage-1', bandage],
   ]);
 
   const resetObjects = () => {
@@ -166,8 +201,21 @@ export function createWorkspace(scene: Scene): Workspace {
     halfDepth: 0.042,
   };
   const tapeSnap = new Vector3(-0.09, TREATMENT_MANIPULATION_SURFACE.height + 0.022, treatmentSnap.z);
+  const bandageZones: BandageZones = {
+    right: new Vector3(-0.005, TREATMENT_MANIPULATION_SURFACE.height, 0.02),
+    center: new Vector3(-0.09, TREATMENT_MANIPULATION_SURFACE.height, 0.02),
+    left: new Vector3(-0.175, TREATMENT_MANIPULATION_SURFACE.height, 0.02),
+    halfWidth: 0.023,
+    halfDepth: 0.06,
+  };
+  const bandageRestartPose = new Vector3(
+    bandageZones.right.x,
+    TREATMENT_MANIPULATION_SURFACE.height + 0.035,
+    bandageZones.right.z,
+  );
   return {
     root, placementIndicator: indicator, pickables, treatmentSurface: treatment,
-    treatmentSnap, solutionZone, tapeZones, tapeSnap, resetObjects,
+    treatmentSnap, solutionZone, tapeZones, tapeSnap, bandageZones,
+    bandageRestartPose, bandageLayerSegments, resetObjects,
   };
 }
