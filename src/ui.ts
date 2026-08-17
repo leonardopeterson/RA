@@ -54,38 +54,45 @@ export class UI {
   showPlacement(): void {
     element('step-number').textContent = 'POSICIONAMENTO';
     element('instruction').textContent = 'Aponte para uma superfície e toque para posicionar.';
-    element('progress-label').textContent = '0 / 3';
+    element('progress-label').textContent = '0 / 4';
     element<HTMLElement>('progress-bar').style.width = '0%';
     element('selection-card').classList.add('hidden');
     element('reposition').classList.add('hidden');
   }
 
   update(snapshot: ActivitySnapshot): void {
-    const shownStep = Math.min(snapshot.step + 1, 3);
-    element('step-number').textContent = snapshot.step >= 3 ? 'PRONTO PARA FINALIZAR' : `ETAPA ${shownStep}`;
+    const shownStep = Math.min(snapshot.step + 1, 4);
+    element('step-number').textContent = snapshot.phaseCompleted ? 'PRIMEIRA FASE CONCLUÍDA' : `ETAPA ${shownStep}`;
     element('instruction').textContent = snapshot.instruction;
-    element('progress-label').textContent = `${Math.min(snapshot.step, 3)} / 3`;
-    element<HTMLElement>('progress-bar').style.width = `${Math.min(snapshot.step / 3, 1) * 100}%`;
+    element('progress-label').textContent = `${Math.min(snapshot.step, 4)} / 4`;
+    element<HTMLElement>('progress-bar').style.width = `${Math.min(snapshot.step / 4, 1) * 100}%`;
+    const counter = element('treatment-counter');
+    counter.classList.toggle('hidden', snapshot.step !== 2);
+    element('counter-value').textContent = `${snapshot.debridementSeconds.toFixed(1)} / ${snapshot.debridementTargetSeconds.toFixed(0)} s`;
     element('reposition').classList.remove('hidden');
-    element('finish').classList.toggle('hidden', snapshot.step < 3);
+    element('finish').classList.add('hidden');
   }
 
-  showSelection(id: ObjectId, name: string, state: ObjectState): void {
+  showSelection(id: ObjectId, name: string, state: ObjectState, held: boolean, canPick: boolean): void {
     this.selectedId = id;
     element('selection-card').classList.remove('hidden');
     element('selected-name').textContent = name;
     const actions = element('actions');
     actions.replaceChildren();
-    if (state === 'held') {
+    if (held) {
       const button = document.createElement('button');
       button.className = 'secondary compact'; button.textContent = 'Soltar'; button.onclick = () => this.callbacks?.release();
       actions.append(button);
-    } else if (state !== 'applied' && state !== 'used') {
+    } else if (canPick) {
       const button = document.createElement('button');
       button.className = 'primary compact'; button.textContent = 'Pegar'; button.onclick = () => this.callbacks?.pick();
       actions.append(button);
     } else {
-      const status = document.createElement('span'); status.className = 'done-label'; status.textContent = 'Concluído ✓'; actions.append(status);
+      const labels: Partial<Record<ObjectState, string>> = {
+        positioned: 'Posicionado ✓', wet: 'Preparado ✓', applying: 'Aplicando…',
+        returned: 'Aplicado ✓', used: 'Utilizado ✓', applied: 'Aplicada ✓',
+      };
+      const status = document.createElement('span'); status.className = 'done-label'; status.textContent = labels[state] ?? 'Aguarde'; actions.append(status);
     }
   }
 

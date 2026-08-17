@@ -1,97 +1,153 @@
 import { EventLog } from './events';
 
-export type ObjectState = 'available' | 'selected' | 'held' | 'used' | 'applied';
-export type ObjectId = 'applicator' | 'cover';
+export type ObjectState = 'available' | 'positioned' | 'wet' | 'applying' | 'returned' | 'used' | 'applied';
+export type ObjectId = 'debrisoft-pad' | 'solution-bottle' | 'gauze';
 
-export interface ActivityObjectState {
+export interface InitialPose {
+  position: readonly [number, number, number];
+  rotation: readonly [number, number, number];
+}
+
+export const OBJECT_INITIAL_POSES: Record<ObjectId, InitialPose> = {
+  'debrisoft-pad': { position: [0.17, 0.047, -0.105], rotation: [0, 0, 0] },
+  'solution-bottle': { position: [0.17, 0.082, 0], rotation: [0, 0, 0] },
+  gauze: { position: [0.17, 0.044, 0.105], rotation: [0, 0, 0] },
+};
+
+export interface ActivityObjectState extends InitialPose {
   id: ObjectId;
   name: string;
   state: ObjectState;
-  initialPosition: readonly [number, number, number];
+  tableOffset: number;
+  treatmentOffset: number;
 }
 
 export interface ActivitySnapshot {
   step: number;
   instruction: string;
-  treatmentProgress: number;
-  completed: boolean;
+  debridementSeconds: number;
+  debridementTargetSeconds: number;
+  phaseCompleted: boolean;
 }
 
+const DEBRIDEMENT_TARGET_SECONDS = 10;
 const instructions = [
-  'Selecione o aplicador e toque em Pegar.',
-  'Deslize o aplicador sobre a área destacada.',
-  'Pegue a cobertura e posicione-a sobre a área de tratamento.',
-  'Sequência pronta. Finalize a atividade.',
+  'Posicione o Debrisoft sobre a lesão.',
+  'Aproxime o frasco e aplique a solução no Debrisoft.',
+  'Faça movimentos circulares sobre a região.',
+  'Posicione a gaze sobre a região tratada.',
+  'Primeira etapa concluída. As bandagens serão adicionadas na próxima fase.',
 ];
 
 export class Activity {
   readonly objects = new Map<ObjectId, ActivityObjectState>([
-    ['applicator', { id: 'applicator', name: 'Aplicador', state: 'available', initialPosition: [0.18, 0.035, 0.04] }],
-    ['cover', { id: 'cover', name: 'Cobertura', state: 'available', initialPosition: [0.18, 0.025, -0.07] }],
+    ['debrisoft-pad', { id: 'debrisoft-pad', name: 'Debrisoft', state: 'available', tableOffset: 0.021, treatmentOffset: 0.012, ...OBJECT_INITIAL_POSES['debrisoft-pad'] }],
+    ['solution-bottle', { id: 'solution-bottle', name: 'Solução', state: 'available', tableOffset: 0.056, treatmentOffset: 0.065, ...OBJECT_INITIAL_POSES['solution-bottle'] }],
+    ['gauze', { id: 'gauze', name: 'Gaze', state: 'available', tableOffset: 0.018, treatmentOffset: 0.014, ...OBJECT_INITIAL_POSES.gauze }],
   ]);
   step = 0;
-  treatmentProgress = 0;
-  completed = false;
-  private interactionStarted = false;
+  debridementSeconds = 0;
+  phaseCompleted = false;
+  private heldId?: ObjectId;
+  private debridementStarted = false;
 
   constructor(readonly events: EventLog) {}
 
   get snapshot(): ActivitySnapshot {
-    return { step: this.step, instruction: instructions[this.step], treatmentProgress: this.treatmentProgress, completed: this.completed };
+    return {
+      step: this.step,
+      instruction: instructions[this.step],
+      debridementSeconds: this.debridementSeconds,
+      debridementTargetSeconds: DEBRIDEMENT_TARGET_SECONDS,
+      phaseCompleted: this.phaseCompleted,
+    };
   }
 
-  select(id: ObjectId): void {
-    const object = this.objects.get(id)!;
-    if (object.state !== 'held' && object.state !== 'applied') object.state = 'selected';
+  select(id: ObjectId): boolean {
     this.events.emit('object_selected', { object: id, step: this.step + 1 });
+    if (!this.canPick(id)) return this.invalid(id, this.invalidPickMessage(id));
+    return true;
+  }
+
+  isHeld(id: ObjectId): boolean {
+    return this.heldId === id;
   }
 
   canPick(id: ObjectId): boolean {
-    if (id === 'applicator') return this.step <= 1;
-    return this.step >= 2;
+    return Boolean(
+      (id === 'debrisoft-pad' && ((this.step === 0 && this.objects.get(id)!.state === 'available')
+        || (this.step === 2 && this.objects.get(id)!.state === 'wet')))
+      || (id === 'solution-bottle' && this.step === 1 && this.objects.get(id)!.state === 'available')
+      || (id === 'gauze' && this.step === 3 && this.objects.get(id)!.state === 'available'),
+    );
   }
 
   pick(id: ObjectId): boolean {
-    if (!this.canPick(id)) return this.invalid(id, 'Objeto fora da ordem atual.');
-    this.objects.get(id)!.state = 'held';
+    if (!this.canPick(id)) return this.invalid(id, this.invalidPickMessage(id));
+    this.heldId = id;
     this.events.emit('object_picked', { object: id, step: this.step + 1 });
-    if (id === 'applicator' && this.step === 0) this.advance();
     return true;
   }
 
   release(id: ObjectId): void {
-    const object = this.objects.get(id)!;
-    if (object.state === 'held') object.state = 'selected';
+    if (this.heldId === id) this.heldId = undefined;
   }
 
-  addTreatmentMotion(distance: number): boolean {
-    if (this.step !== 1 || this.objects.get('applicator')!.state !== 'held') return false;
-    if (!this.interactionStarted) {
-      this.interactionStarted = true;
-      this.events.emit('interaction_started', { object: 'applicator', target: 'treatment-surface', step: 2 });
-    }
-    this.treatmentProgress = Math.min(1, this.treatmentProgress + distance / 0.22);
-    if (this.treatmentProgress >= 1) {
-      this.objects.get('applicator')!.state = 'used';
-      this.events.emit('interaction_completed', { object: 'applicator', target: 'treatment-surface', step: 2 });
-      this.advance();
-      return true;
-    }
-    return false;
-  }
-
-  applyCover(): boolean {
-    if (this.step !== 2 || this.objects.get('cover')!.state !== 'held') return this.invalid('cover', 'Prepare a área antes de aplicar a cobertura.');
-    this.objects.get('cover')!.state = 'applied';
-    this.events.emit('object_applied', { object: 'cover', target: 'treatment-surface', step: 3 });
+  positionDebrisoft(): boolean {
+    if (this.step !== 0 || !this.isHeld('debrisoft-pad')) return this.invalid('debrisoft-pad', 'Posicione o Debrisoft antes de continuar.');
+    this.objects.get('debrisoft-pad')!.state = 'positioned';
+    this.release('debrisoft-pad');
+    this.events.emit('debrisoft_positioned', { object: 'debrisoft-pad', target: 'treatment-surface', step: 1 });
     this.advance();
     return true;
   }
 
-  finish(): boolean {
-    if (this.step < 3) return this.invalid(undefined, 'Conclua as etapas antes de finalizar.');
-    this.completed = true;
-    this.events.emit('activity_completed', { step: 3 });
+  beginSolutionApplication(): boolean {
+    if (this.step !== 1 || !this.isHeld('solution-bottle') || this.objects.get('debrisoft-pad')!.state !== 'positioned') {
+      return this.invalid('solution-bottle', 'Posicione o Debrisoft antes de aplicar a solução.');
+    }
+    this.objects.get('solution-bottle')!.state = 'applying';
+    return true;
+  }
+
+  completeSolutionApplication(): void {
+    this.objects.get('debrisoft-pad')!.state = 'wet';
+    this.release('solution-bottle');
+    this.events.emit('solution_applied', { object: 'solution-bottle', target: 'debrisoft-pad', step: 2 });
+    this.advance();
+  }
+
+  markSolutionReturned(): void {
+    this.objects.get('solution-bottle')!.state = 'returned';
+  }
+
+  addDebridementTime(seconds: number): boolean {
+    if (this.step !== 2 || !this.isHeld('debrisoft-pad') || this.objects.get('debrisoft-pad')!.state !== 'wet') {
+      this.invalid('debrisoft-pad', 'Aplique a solução antes de iniciar o debridamento.');
+      return false;
+    }
+    if (!this.debridementStarted) {
+      this.debridementStarted = true;
+      this.events.emit('debridement_started', { object: 'debrisoft-pad', target: 'treatment-surface', step: 3 });
+    }
+    this.debridementSeconds = Math.min(DEBRIDEMENT_TARGET_SECONDS, this.debridementSeconds + seconds);
+    if (this.debridementSeconds < DEBRIDEMENT_TARGET_SECONDS) return false;
+    this.objects.get('debrisoft-pad')!.state = 'used';
+    this.release('debrisoft-pad');
+    this.events.emit('debridement_completed', { object: 'debrisoft-pad', target: 'treatment-surface', step: 3 });
+    this.advance();
+    return true;
+  }
+
+  applyGauze(): boolean {
+    if (this.step !== 3 || !this.isHeld('gauze') || this.objects.get('debrisoft-pad')!.state !== 'used') {
+      return this.invalid('gauze', 'Conclua o debridamento antes de aplicar a gaze.');
+    }
+    this.objects.get('gauze')!.state = 'applied';
+    this.release('gauze');
+    this.events.emit('gauze_applied', { object: 'gauze', target: 'treatment-surface', step: 4 });
+    this.advance();
+    this.phaseCompleted = true;
     return true;
   }
 
@@ -100,7 +156,14 @@ export class Activity {
     this.step++;
   }
 
-  private invalid(object: ObjectId | undefined, detail: string): false {
+  private invalidPickMessage(id: ObjectId): string {
+    if (id === 'solution-bottle' && this.step === 0) return 'Posicione o Debrisoft antes de aplicar a solução.';
+    if (id === 'gauze' && this.step < 3) return 'Conclua o debridamento antes de aplicar a gaze.';
+    if (id === 'debrisoft-pad' && this.step === 1) return 'Aplique a solução antes de iniciar o debridamento.';
+    return 'Esse objeto não é necessário nesta etapa.';
+  }
+
+  private invalid(object: ObjectId, detail: string): false {
     this.events.emit('invalid_action', { object, step: this.step + 1, detail });
     return false;
   }

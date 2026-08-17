@@ -47,6 +47,8 @@ p { color: #b7cec6; line-height: 1.55; }
 .step-card { width: min(92vw, 520px); padding: 16px 18px; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); backdrop-filter: blur(16px); }
 .step-line { display: flex; justify-content: space-between; margin-bottom: 8px; color: var(--green); font-size: 11px; font-weight: 700; letter-spacing: .12em; }
 .step-card strong { display: block; font-size: 15px; line-height: 1.35; }
+.treatment-counter { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; padding: 9px 11px; border-radius: 10px; color: #a9c5ba; background: rgba(255,255,255,.055); font-size: 12px; }
+.treatment-counter strong { color: var(--green); font-size: 14px; }
 .progress { height: 3px; margin-top: 14px; overflow: hidden; border-radius: 3px; background: rgba(255,255,255,.1); }
 .progress i { display: block; width: 0; height: 100%; background: var(--green); transition: width .3s ease; }
 .feedback { margin-top: 12px; max-width: 88vw; padding: 10px 16px; border-radius: 99px; color: #06231a; background: #dffcef; font-size: 14px; font-weight: 700; box-shadow: 0 8px 28px rgba(0,0,0,.28); }

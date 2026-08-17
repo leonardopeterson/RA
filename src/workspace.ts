@@ -1,19 +1,18 @@
 import {
   AbstractMesh, Color3, Mesh, MeshBuilder, PBRMaterial, Scene, StandardMaterial,
-  SceneLoader, TransformNode, Vector3,
+  TransformNode, Vector3,
 } from '@babylonjs/core';
-import type { ObjectId } from './activity';
+import { OBJECT_INITIAL_POSES, type ObjectId } from './activity';
 
 export const WORKSPACE = { halfWidth: 0.28, halfDepth: 0.20, surfaceY: 0.026 } as const;
 
-// Logical manipulation surface. It is intentionally independent from the limb mesh,
-// so replacing the visual model only requires tuning these measurements in meters.
+// Logical surface data remains independent from the provisional leg meshes.
 export const TREATMENT_MANIPULATION_SURFACE = {
   centerX: -0.09,
-  centerZ: 0,
+  centerZ: 0.045,
   height: 0.159,
-  radius: 0.072,
-  halfStraightLength: 0.105,
+  radius: 0.073,
+  halfStraightLength: 0.09,
 } as const;
 
 export interface Workspace {
@@ -21,7 +20,8 @@ export interface Workspace {
   placementIndicator: Mesh;
   pickables: Map<ObjectId, AbstractMesh>;
   treatmentSurface: Mesh;
-  coverSnap: Vector3;
+  treatmentSnap: Vector3;
+  solutionZone: Vector3;
   resetObjects(): void;
 }
 
@@ -53,76 +53,92 @@ export function createWorkspace(scene: Scene): Workspace {
   base.material = material(scene, 'base-material', '#dce9e4');
   base.isPickable = false;
 
-  const tray = MeshBuilder.CreateBox('instrument-tray', { width: 0.19, depth: 0.30, height: 0.012 }, scene);
+  const tray = MeshBuilder.CreateBox('instrument-tray', { width: 0.19, depth: 0.33, height: 0.012 }, scene);
   tray.parent = root;
   tray.position.set(0.17, 0.033, 0);
   tray.material = material(scene, 'tray-material', '#829b94', 0.35);
   tray.isPickable = false;
 
-  const limb = MeshBuilder.CreateCapsule('body-region', { radius: 0.065, height: 0.34, tessellation: 32 }, scene);
-  limb.parent = root;
-  limb.rotation.x = Math.PI / 2;
-  limb.position.set(-0.09, 0.094, 0);
-  limb.scaling.x = 1.08;
-  limb.material = material(scene, 'skin-material', '#d89f83', 0.82);
-  limb.isPickable = false;
+  // Provisional lower leg, ankle and foot. The foot's broad sole faces +Z,
+  // toward the user side of the workspace.
+  const lowerLeg = MeshBuilder.CreateCapsule('lower-leg', { radius: 0.066, height: 0.29, tessellation: 32 }, scene);
+  lowerLeg.parent = root;
+  lowerLeg.rotation.x = Math.PI / 2;
+  lowerLeg.position.set(-0.09, 0.094, -0.035);
+  lowerLeg.scaling.x = 1.08;
+  lowerLeg.material = material(scene, 'skin-material', '#d89f83', 0.82);
+  lowerLeg.isPickable = false;
 
-  const treatment = MeshBuilder.CreateDisc('TreatmentInteractionSurface', { radius: 0.042, tessellation: 40 }, scene);
+  const ankle = MeshBuilder.CreateSphere('ankle', { diameter: 0.12, segments: 24 }, scene);
+  ankle.parent = root;
+  ankle.position.set(-0.09, 0.09, 0.112);
+  ankle.scaling.z = 0.78;
+  ankle.material = lowerLeg.material;
+  ankle.isPickable = false;
+
+  const foot = MeshBuilder.CreateBox('foot', { width: 0.13, height: 0.14, depth: 0.055 }, scene);
+  foot.parent = root;
+  foot.position.set(-0.09, 0.105, 0.165);
+  foot.material = lowerLeg.material;
+  foot.isPickable = false;
+
+  const treatment = MeshBuilder.CreateDisc('TreatmentInteractionSurface', { radius: 0.043, tessellation: 40 }, scene);
   treatment.parent = root;
   treatment.rotation.x = Math.PI / 2;
-  treatment.position.set(-0.09, 0.159, 0);
+  treatment.position.set(-0.09, TREATMENT_MANIPULATION_SURFACE.height, 0.055);
   treatment.material = material(scene, 'treatment-material', '#a94f55');
   treatment.isPickable = false;
 
-  const halo = MeshBuilder.CreateTorus('treatment-halo', { diameter: 0.105, thickness: 0.004, tessellation: 40 }, scene);
+  const halo = MeshBuilder.CreateTorus('treatment-halo', { diameter: 0.108, thickness: 0.004, tessellation: 40 }, scene);
   halo.parent = root;
   halo.rotation.x = Math.PI / 2;
-  halo.position.set(-0.09, 0.161, 0);
+  halo.position.set(-0.09, TREATMENT_MANIPULATION_SURFACE.height + 0.002, 0.055);
   const haloMat = new StandardMaterial('halo-material', scene);
   haloMat.emissiveColor = new Color3(0.25, 1, 0.68);
   haloMat.alpha = 0.55;
   halo.material = haloMat;
   halo.isPickable = false;
 
-  const applicatorRoot = new Mesh('applicator', scene);
-  applicatorRoot.parent = root;
-  const handle = MeshBuilder.CreateCylinder('applicator-handle', { height: 0.14, diameter: 0.012, tessellation: 20 }, scene);
-  handle.parent = applicatorRoot;
-  handle.rotation.z = Math.PI / 2;
-  handle.material = material(scene, 'applicator-handle-material', '#e8e2d2');
-  const tip = MeshBuilder.CreateSphere('InteractionPoint', { diameter: 0.025, segments: 16 }, scene);
-  tip.parent = applicatorRoot;
-  tip.position.x = -0.075;
-  tip.scaling.x = 1.35;
-  tip.material = material(scene, 'applicator-tip-material', '#f8fbfa');
-  tag([handle, tip], 'applicator');
+  const debrisoft = MeshBuilder.CreateCylinder('debrisoft-pad', { diameter: 0.072, height: 0.014, tessellation: 32 }, scene);
+  debrisoft.parent = root;
+  debrisoft.material = material(scene, 'debrisoft-material', '#d9f2ef');
+  tag([debrisoft], 'debrisoft-pad');
 
-  const cover = MeshBuilder.CreateBox('cover', { width: 0.105, depth: 0.085, height: 0.008 }, scene);
-  cover.parent = root;
-  cover.material = material(scene, 'cover-material', '#f8faf8');
-  tag([cover], 'cover');
+  const bottle = new Mesh('solution-bottle', scene);
+  bottle.parent = root;
+  const bottleBody = MeshBuilder.CreateCylinder('solution-bottle-body', { height: 0.105, diameter: 0.042, tessellation: 24 }, scene);
+  bottleBody.parent = bottle;
+  bottleBody.position.y = 0.0525;
+  bottleBody.material = material(scene, 'bottle-material', '#69a9bd', 0.3);
+  const bottleCap = MeshBuilder.CreateCylinder('solution-bottle-cap', { height: 0.024, diameter: 0.025, tessellation: 20 }, scene);
+  bottleCap.parent = bottle;
+  bottleCap.position.y = 0.116;
+  bottleCap.material = material(scene, 'cap-material', '#e8f5f2', 0.4);
+  tag([bottleBody, bottleCap], 'solution-bottle');
 
-  const attachExternalModel = (file: string, holder: AbstractMesh, id: ObjectId, fallback: AbstractMesh[]) => {
-    const modelsRoot = `${import.meta.env.BASE_URL}models/`;
-    void SceneLoader.ImportMeshAsync('', modelsRoot, file, scene).then(({ meshes }) => {
-      if (!meshes.length) return;
-      meshes[0].parent = holder;
-      meshes.forEach((mesh) => tag([mesh], id));
-      fallback.forEach((mesh) => mesh === holder ? (mesh.material as PBRMaterial).alpha = 0 : mesh.dispose());
-    }).catch((error) => console.warn(`Asset ${file} indisponível; usando fallback.`, error));
-  };
-  attachExternalModel('clinical-applicator.glb', applicatorRoot, 'applicator', [handle, tip]);
-  attachExternalModel('clinical-cover.glb', cover, 'cover', [cover]);
+  const gauze = MeshBuilder.CreateBox('gauze', { width: 0.092, depth: 0.076, height: 0.009 }, scene);
+  gauze.parent = root;
+  gauze.material = material(scene, 'gauze-material', '#fbfcf8');
+  tag([gauze], 'gauze');
 
-  const pickables = new Map<ObjectId, AbstractMesh>([['applicator', applicatorRoot], ['cover', cover]]);
+  const pickables = new Map<ObjectId, AbstractMesh>([
+    ['debrisoft-pad', debrisoft],
+    ['solution-bottle', bottle],
+    ['gauze', gauze],
+  ]);
+
   const resetObjects = () => {
-    applicatorRoot.position.set(0.18, 0.055, 0.04);
-    applicatorRoot.rotation.set(0, 0, 0);
-    cover.position.set(0.18, 0.045, -0.07);
-    cover.rotation.set(0, 0, 0);
+    for (const [id, mesh] of pickables) {
+      const pose = OBJECT_INITIAL_POSES[id];
+      mesh.position.set(...pose.position);
+      mesh.rotationQuaternion = null;
+      mesh.rotation.set(...pose.rotation);
+    }
   };
   resetObjects();
   root.setEnabled(false);
 
-  return { root, placementIndicator: indicator, pickables, treatmentSurface: treatment, coverSnap: new Vector3(-0.09, 0.169, 0), resetObjects };
+  const treatmentSnap = new Vector3(-0.09, TREATMENT_MANIPULATION_SURFACE.height + 0.012, 0.055);
+  const solutionZone = new Vector3(treatmentSnap.x, TREATMENT_MANIPULATION_SURFACE.height + 0.065, treatmentSnap.z);
+  return { root, placementIndicator: indicator, pickables, treatmentSurface: treatment, treatmentSnap, solutionZone, resetObjects };
 }

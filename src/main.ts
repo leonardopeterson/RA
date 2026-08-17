@@ -25,7 +25,7 @@ const placedWorkspace = () => {
   events.emit('workspace_placed');
   events.emit('activity_started', { step: 1 });
   ui.update(activity.snapshot);
-  ui.notify('Estação posicionada. Selecione o aplicador.', 'success');
+  ui.notify('Estação posicionada. Selecione o Debrisoft.', 'success');
 };
 
 const ar = new ARController(context.scene, workspace, ui, placedWorkspace);
@@ -59,13 +59,7 @@ ui.bind({
   },
   pick: () => interaction.pickSelected(),
   release: () => interaction.releaseSelected(),
-  finish: () => {
-    if (!activity.finish()) {
-      ui.notify('Ainda há etapas pendentes.', 'error');
-      return;
-    }
-    ui.showSummary(events.count('invalid_action'), Date.now() - events.startedAt);
-  },
+  finish: () => ui.notify('A próxima fase do curativo ainda será implementada.', 'info'),
   restart: () => location.reload(),
 });
 
