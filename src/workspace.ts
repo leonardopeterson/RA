@@ -5,8 +5,8 @@ import {
 import { OBJECT_INITIAL_POSES, type BandageId, type ObjectId } from './activity';
 
 export const WORKSPACE = { halfWidth: 0.28, halfDepth: 0.20, surfaceY: 0.026 } as const;
-export const BANDAGE_LAYER_1_DIAMETER = 0.147;
-export const BANDAGE_LAYER_2_RADIAL_OFFSET = 0.014;
+export const BANDAGE_LAYER_1_DIAMETER = 0.098;
+export const BANDAGE_LAYER_2_RADIAL_OFFSET = 0.009;
 
 // Logical surface data remains independent from the provisional leg meshes.
 export const TREATMENT_MANIPULATION_SURFACE = {
@@ -136,20 +136,24 @@ export function createWorkspace(scene: Scene): Workspace {
       foot.setEnabled(true);
     });
 
+  // Visual wound disc – positioned at the anterior surface of the new leg model,
+  // slightly above (0.002) to avoid z-fighting. The logical TREATMENT_MANIPULATION_SURFACE
+  // height is preserved for gameplay; only the visual representation is lowered.
+  const woundVisualY = 0.117;
   const treatment = MeshBuilder.CreateDisc('TreatmentInteractionSurface', { radius: 0.043, tessellation: 40 }, scene);
   treatment.parent = root;
   treatment.rotation.x = Math.PI / 2;
-  treatment.position.set(-0.09, TREATMENT_MANIPULATION_SURFACE.height, 0.055);
+  treatment.position.set(-0.09, woundVisualY, 0.055);
   treatment.material = material(scene, 'treatment-material', '#a94f55');
   treatment.isPickable = false;
 
-  const halo = MeshBuilder.CreateTorus('treatment-halo', { diameter: 0.108, thickness: 0.004, tessellation: 40 }, scene);
+  const halo = MeshBuilder.CreateTorus('treatment-halo', { diameter: 0.095, thickness: 0.004, tessellation: 40 }, scene);
   halo.parent = root;
   halo.rotation.x = Math.PI / 2;
-  halo.position.set(-0.09, TREATMENT_MANIPULATION_SURFACE.height + 0.002, 0.055);
+  halo.position.set(-0.09, woundVisualY + 0.002, 0.055);
   const haloMat = new StandardMaterial('halo-material', scene);
   haloMat.emissiveColor = new Color3(0.25, 1, 0.68);
-  haloMat.alpha = 0.55;
+  haloMat.alpha = 0.40;
   halo.material = haloMat;
   halo.isPickable = false;
 
@@ -195,12 +199,12 @@ export function createWorkspace(scene: Scene): Workspace {
     return Array.from({ length: 10 }, (_, index) => {
       const segment = MeshBuilder.CreateTorus(`bandage-layer-${layer}-segment-${index + 1}`, {
       diameter,
-      thickness: 0.012,
+      thickness: 0.010,
       tessellation: 32,
     }, scene);
     segment.parent = root;
     segment.rotation.x = Math.PI / 2;
-    segment.position.set(-0.09, 0.094, zStart - index * 0.02);
+    segment.position.set(-0.09, 0.082, zStart - index * 0.02);
     segment.material = layerMaterial;
     segment.isPickable = false;
     segment.setEnabled(false);
@@ -209,7 +213,7 @@ export function createWorkspace(scene: Scene): Workspace {
   };
   const bandageLayerSegments: Record<BandageId, Mesh[]> = {
     'bandage-1': createBandageLayer(1, BANDAGE_LAYER_1_DIAMETER, 0.09, '#eee3cb'),
-    'bandage-2': createBandageLayer(2, BANDAGE_LAYER_1_DIAMETER + BANDAGE_LAYER_2_RADIAL_OFFSET, 0.085, '#d8e8e5'),
+    'bandage-2': createBandageLayer(2, BANDAGE_LAYER_1_DIAMETER + BANDAGE_LAYER_2_RADIAL_OFFSET, 0.087, '#d8e8e5'),
   };
 
   const pickables = new Map<ObjectId, AbstractMesh>([
