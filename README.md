@@ -31,3 +31,4 @@ Os modelos GLB leves ficam em `public/models`. Para recriá-los após ajustes no
 ```bash
 node scripts/generate-models.mjs
 ```
+# RA
