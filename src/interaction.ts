@@ -4,7 +4,7 @@ import {
 } from '@babylonjs/core';
 import { Activity, OBJECT_INITIAL_POSES, type ObjectId } from './activity';
 import type { UI } from './ui';
-import { TREATMENT_MANIPULATION_SURFACE, WORKSPACE, type Workspace } from './workspace';
+import { TREATMENT_MANIPULATION_SURFACE, WORKSPACE, type TapeZoneName, type Workspace } from './workspace';
 
 const HEIGHT_SMOOTHING_SPEED = 10;
 const ELEVATION_START_DISTANCE = 0.08;
@@ -24,6 +24,8 @@ export class InteractionController {
   private lastMovementAt?: number;
   private solutionAnimationRunning = false;
   private poseAnimations = new Set<ObjectId>();
+  private tapeStartSide?: 'sideA' | 'sideB';
+  private tapeCenterCrossed = false;
 
   constructor(private scene: Scene, private workspace: Workspace, private activity: Activity, private ui: UI) {
     this.highlight = new HighlightLayer('selection-highlight', scene);
@@ -31,6 +33,7 @@ export class InteractionController {
     this.setupDrag('debrisoft-pad');
     this.setupDrag('solution-bottle');
     this.setupDrag('gauze');
+    this.setupDrag('tape-strip');
     this.scene.onBeforeRenderObservable.add(() => this.updateAutomaticHeights());
     this.scene.onPointerObservable.add((pointer) => {
       if (pointer.type !== PointerEventTypes.POINTERPICK || !pointer.pickInfo?.pickedMesh) return;
@@ -73,8 +76,14 @@ export class InteractionController {
     } else if (id === 'gauze' && this.isOnTreatment(mesh.position)) {
       if (this.activity.applyGauze()) {
         this.placeAtTreatmentSnap(id);
-        this.ui.notify('Primeira etapa concluída.', 'success');
+        this.ui.notify('Gaze aplicada. Use o esparadrapo.', 'success');
       }
+    } else if (id === 'tape-strip') {
+      const incomplete = this.activity.objects.get(id)!.state === 'applying';
+      this.activity.cancelTapeApplication();
+      this.resetTapeTraversal();
+      if (incomplete) this.ui.notify('Fixação incompleta. Tente novamente.', 'error');
+      void this.returnToInitialPose(id);
     } else {
       this.activity.release(id);
       this.targetY.set(id, this.calculateTargetY(id, mesh.position));
@@ -125,7 +134,51 @@ export class InteractionController {
       void this.animateSolutionApplication();
     } else if (id === 'debrisoft-pad' && this.activity.step === 2) {
       this.updateDebridement(mesh.position);
+    } else if (id === 'tape-strip' && this.activity.step === 4) {
+      this.updateTapeApplication(mesh.position);
     }
+  }
+
+  private updateTapeApplication(position: Vector3): void {
+    const safeTapeY = TREATMENT_MANIPULATION_SURFACE.height
+      + this.activity.objects.get('tape-strip')!.treatmentOffset;
+    if (this.surfaceBlend(position) < 0.98 || position.y < safeTapeY - 0.008) return;
+    const zone = this.tapeZoneAt(position);
+    if (!this.tapeStartSide) {
+      if (zone !== 'sideA' && zone !== 'sideB') return;
+      if (!this.activity.beginTapeApplication()) return;
+      this.tapeStartSide = zone;
+      this.tapeCenterCrossed = false;
+      this.ui.notify('Fixação iniciada.', 'success');
+      this.ui.update(this.activity.snapshot);
+      this.refreshSelection('tape-strip');
+      return;
+    }
+
+    if (zone === 'center') {
+      if (!this.tapeCenterCrossed) this.ui.notify('Continue até a lateral oposta.', 'info');
+      this.tapeCenterCrossed = true;
+      return;
+    }
+
+    const oppositeSide = this.tapeStartSide === 'sideA' ? 'sideB' : 'sideA';
+    if (zone !== oppositeSide || !this.tapeCenterCrossed) return;
+    if (!this.activity.applyTape()) return;
+    this.placeAtTapeSnap();
+    this.resetTapeTraversal();
+    this.ui.notify('Fixação concluída.', 'success');
+    this.ui.update(this.activity.snapshot);
+    this.refreshSelection('tape-strip');
+  }
+
+  private tapeZoneAt(position: Vector3): TapeZoneName | undefined {
+    const zones = this.workspace.tapeZones;
+    for (const name of ['sideA', 'center', 'sideB'] as const) {
+      const zone = zones[name];
+      if (Math.abs(position.x - zone.x) <= zones.halfWidth
+        && Math.abs(position.z - zone.z) <= zones.halfDepth) return name;
+    }
+    return undefined;
   }
 
   private updateDebridement(position: Vector3): void {
@@ -232,6 +285,22 @@ export class InteractionController {
     this.drags.get(id)!.enabled = false;
   }
 
+  private placeAtTapeSnap(): void {
+    const id: ObjectId = 'tape-strip';
+    const mesh = this.workspace.pickables.get(id)!;
+    mesh.position.copyFrom(this.workspace.tapeSnap);
+    mesh.rotationQuaternion = null;
+    mesh.rotation.set(...OBJECT_INITIAL_POSES[id].rotation);
+    this.currentY.set(id, this.workspace.tapeSnap.y);
+    this.targetY.set(id, this.workspace.tapeSnap.y);
+    this.drags.get(id)!.enabled = false;
+  }
+
+  private resetTapeTraversal(): void {
+    this.tapeStartSide = undefined;
+    this.tapeCenterCrossed = false;
+  }
+
   private calculateTargetY(id: ObjectId, localPosition: Vector3): number {
     const object = this.activity.objects.get(id)!;
     const tableY = WORKSPACE.surfaceY + object.tableOffset;
@@ -316,6 +385,7 @@ export class InteractionController {
     if (id === 'solution-bottle' && this.activity.step === 0) return 'Posicione o Debrisoft antes de aplicar a solução.';
     if (id === 'gauze' && this.activity.step < 3) return 'Conclua o debridamento antes de aplicar a gaze.';
     if (id === 'debrisoft-pad' && this.activity.step === 1) return 'Aplique a solução antes de iniciar o debridamento.';
+    if (id === 'tape-strip' && this.activity.step < 4) return 'Aplique a gaze antes de usar o esparadrapo.';
     return 'Esse objeto não é necessário nesta etapa.';
   }
 

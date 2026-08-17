@@ -1,7 +1,7 @@
 import { EventLog } from './events';
 
 export type ObjectState = 'available' | 'positioned' | 'wet' | 'applying' | 'returned' | 'used' | 'applied';
-export type ObjectId = 'debrisoft-pad' | 'solution-bottle' | 'gauze';
+export type ObjectId = 'debrisoft-pad' | 'solution-bottle' | 'gauze' | 'tape-strip';
 
 export interface InitialPose {
   position: readonly [number, number, number];
@@ -12,6 +12,7 @@ export const OBJECT_INITIAL_POSES: Record<ObjectId, InitialPose> = {
   'debrisoft-pad': { position: [0.17, 0.047, -0.105], rotation: [0, 0, 0] },
   'solution-bottle': { position: [0.17, 0.082, 0], rotation: [0, 0, 0] },
   gauze: { position: [0.17, 0.044, 0.105], rotation: [0, 0, 0] },
+  'tape-strip': { position: [0.17, 0.043, 0.155], rotation: [0, 0, 0] },
 };
 
 export interface ActivityObjectState extends InitialPose {
@@ -36,7 +37,8 @@ const instructions = [
   'Aproxime o frasco e aplique a solução no Debrisoft.',
   'Faça movimentos circulares sobre a região.',
   'Posicione a gaze sobre a região tratada.',
-  'Primeira etapa concluída. As bandagens serão adicionadas na próxima fase.',
+  'Fixe a gaze com o esparadrapo.',
+  'Fixação concluída. As bandagens serão adicionadas na próxima fase.',
 ];
 
 export class Activity {
@@ -44,6 +46,7 @@ export class Activity {
     ['debrisoft-pad', { id: 'debrisoft-pad', name: 'Debrisoft', state: 'available', tableOffset: 0.021, treatmentOffset: 0.012, ...OBJECT_INITIAL_POSES['debrisoft-pad'] }],
     ['solution-bottle', { id: 'solution-bottle', name: 'Solução', state: 'available', tableOffset: 0.056, treatmentOffset: 0.065, ...OBJECT_INITIAL_POSES['solution-bottle'] }],
     ['gauze', { id: 'gauze', name: 'Gaze', state: 'available', tableOffset: 0.018, treatmentOffset: 0.014, ...OBJECT_INITIAL_POSES.gauze }],
+    ['tape-strip', { id: 'tape-strip', name: 'Esparadrapo', state: 'available', tableOffset: 0.017, treatmentOffset: 0.022, ...OBJECT_INITIAL_POSES['tape-strip'] }],
   ]);
   step = 0;
   debridementSeconds = 0;
@@ -56,7 +59,9 @@ export class Activity {
   get snapshot(): ActivitySnapshot {
     return {
       step: this.step,
-      instruction: instructions[this.step],
+      instruction: this.step === 4 && this.objects.get('tape-strip')!.state === 'applying'
+        ? 'Arraste a tira através da gaze.'
+        : instructions[this.step],
       debridementSeconds: this.debridementSeconds,
       debridementTargetSeconds: DEBRIDEMENT_TARGET_SECONDS,
       phaseCompleted: this.phaseCompleted,
@@ -78,7 +83,9 @@ export class Activity {
       (id === 'debrisoft-pad' && ((this.step === 0 && this.objects.get(id)!.state === 'available')
         || (this.step === 2 && this.objects.get(id)!.state === 'wet')))
       || (id === 'solution-bottle' && this.step === 1 && this.objects.get(id)!.state === 'available')
-      || (id === 'gauze' && this.step === 3 && this.objects.get(id)!.state === 'available'),
+      || (id === 'gauze' && this.step === 3 && this.objects.get(id)!.state === 'available')
+      || (id === 'tape-strip' && this.step === 4 && this.objects.get('gauze')!.state === 'applied'
+        && this.objects.get(id)!.state === 'available'),
     );
   }
 
@@ -147,6 +154,34 @@ export class Activity {
     this.release('gauze');
     this.events.emit('gauze_applied', { object: 'gauze', target: 'treatment-surface', step: 4 });
     this.advance();
+    return true;
+  }
+
+  beginTapeApplication(): boolean {
+    if (this.step !== 4 || !this.isHeld('tape-strip') || this.objects.get('gauze')!.state !== 'applied') {
+      return this.invalid('tape-strip', 'Aplique a gaze antes de iniciar a fixação.');
+    }
+    this.objects.get('tape-strip')!.state = 'applying';
+    this.events.emit('tape_application_started', { object: 'tape-strip', target: 'gauze', step: 5 });
+    return true;
+  }
+
+  cancelTapeApplication(): void {
+    const tape = this.objects.get('tape-strip')!;
+    const hadStarted = tape.state === 'applying';
+    tape.state = 'available';
+    this.release('tape-strip');
+    if (hadStarted) this.invalid('tape-strip', 'Atravesse o centro e alcance a lateral oposta.');
+  }
+
+  applyTape(): boolean {
+    if (this.step !== 4 || !this.isHeld('tape-strip') || this.objects.get('tape-strip')!.state !== 'applying') {
+      return this.invalid('tape-strip', 'Inicie a fixação por uma das laterais da gaze.');
+    }
+    this.objects.get('tape-strip')!.state = 'applied';
+    this.release('tape-strip');
+    this.events.emit('tape_applied', { object: 'tape-strip', target: 'gauze', step: 5 });
+    this.advance();
     this.phaseCompleted = true;
     return true;
   }
@@ -159,6 +194,7 @@ export class Activity {
   private invalidPickMessage(id: ObjectId): string {
     if (id === 'solution-bottle' && this.step === 0) return 'Posicione o Debrisoft antes de aplicar a solução.';
     if (id === 'gauze' && this.step < 3) return 'Conclua o debridamento antes de aplicar a gaze.';
+    if (id === 'tape-strip' && this.step < 4) return 'Aplique a gaze antes de usar o esparadrapo.';
     if (id === 'debrisoft-pad' && this.step === 1) return 'Aplique a solução antes de iniciar o debridamento.';
     return 'Esse objeto não é necessário nesta etapa.';
   }

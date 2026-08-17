@@ -15,6 +15,16 @@ export const TREATMENT_MANIPULATION_SURFACE = {
   halfStraightLength: 0.09,
 } as const;
 
+export type TapeZoneName = 'sideA' | 'center' | 'sideB';
+
+export interface TapeZones {
+  sideA: Vector3;
+  center: Vector3;
+  sideB: Vector3;
+  halfWidth: number;
+  halfDepth: number;
+}
+
 export interface Workspace {
   root: TransformNode;
   placementIndicator: Mesh;
@@ -22,6 +32,8 @@ export interface Workspace {
   treatmentSurface: Mesh;
   treatmentSnap: Vector3;
   solutionZone: Vector3;
+  tapeZones: TapeZones;
+  tapeSnap: Vector3;
   resetObjects(): void;
 }
 
@@ -121,10 +133,16 @@ export function createWorkspace(scene: Scene): Workspace {
   gauze.material = material(scene, 'gauze-material', '#fbfcf8');
   tag([gauze], 'gauze');
 
+  const tape = MeshBuilder.CreateBox('tape-strip', { width: 0.15, depth: 0.018, height: 0.005 }, scene);
+  tape.parent = root;
+  tape.material = material(scene, 'tape-material', '#e8d6b5', 0.88);
+  tag([tape], 'tape-strip');
+
   const pickables = new Map<ObjectId, AbstractMesh>([
     ['debrisoft-pad', debrisoft],
     ['solution-bottle', bottle],
     ['gauze', gauze],
+    ['tape-strip', tape],
   ]);
 
   const resetObjects = () => {
@@ -140,5 +158,16 @@ export function createWorkspace(scene: Scene): Workspace {
 
   const treatmentSnap = new Vector3(-0.09, TREATMENT_MANIPULATION_SURFACE.height + 0.012, 0.055);
   const solutionZone = new Vector3(treatmentSnap.x, TREATMENT_MANIPULATION_SURFACE.height + 0.065, treatmentSnap.z);
-  return { root, placementIndicator: indicator, pickables, treatmentSurface: treatment, treatmentSnap, solutionZone, resetObjects };
+  const tapeZones: TapeZones = {
+    sideA: new Vector3(-0.145, TREATMENT_MANIPULATION_SURFACE.height, treatmentSnap.z),
+    center: new Vector3(-0.09, TREATMENT_MANIPULATION_SURFACE.height, treatmentSnap.z),
+    sideB: new Vector3(-0.035, TREATMENT_MANIPULATION_SURFACE.height, treatmentSnap.z),
+    halfWidth: 0.018,
+    halfDepth: 0.042,
+  };
+  const tapeSnap = new Vector3(-0.09, TREATMENT_MANIPULATION_SURFACE.height + 0.022, treatmentSnap.z);
+  return {
+    root, placementIndicator: indicator, pickables, treatmentSurface: treatment,
+    treatmentSnap, solutionZone, tapeZones, tapeSnap, resetObjects,
+  };
 }

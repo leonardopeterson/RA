@@ -54,18 +54,18 @@ export class UI {
   showPlacement(): void {
     element('step-number').textContent = 'POSICIONAMENTO';
     element('instruction').textContent = 'Aponte para uma superfície e toque para posicionar.';
-    element('progress-label').textContent = '0 / 4';
+    element('progress-label').textContent = '0 / 5';
     element<HTMLElement>('progress-bar').style.width = '0%';
     element('selection-card').classList.add('hidden');
     element('reposition').classList.add('hidden');
   }
 
   update(snapshot: ActivitySnapshot): void {
-    const shownStep = Math.min(snapshot.step + 1, 4);
+    const shownStep = Math.min(snapshot.step + 1, 5);
     element('step-number').textContent = snapshot.phaseCompleted ? 'PRIMEIRA FASE CONCLUÍDA' : `ETAPA ${shownStep}`;
     element('instruction').textContent = snapshot.instruction;
-    element('progress-label').textContent = `${Math.min(snapshot.step, 4)} / 4`;
-    element<HTMLElement>('progress-bar').style.width = `${Math.min(snapshot.step / 4, 1) * 100}%`;
+    element('progress-label').textContent = `${Math.min(snapshot.step, 5)} / 5`;
+    element<HTMLElement>('progress-bar').style.width = `${Math.min(snapshot.step / 5, 1) * 100}%`;
     const counter = element('treatment-counter');
     counter.classList.toggle('hidden', snapshot.step !== 2);
     element('counter-value').textContent = `${snapshot.debridementSeconds.toFixed(1)} / ${snapshot.debridementTargetSeconds.toFixed(0)} s`;

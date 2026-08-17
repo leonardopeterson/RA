@@ -3,7 +3,7 @@ export type ActivityEventName =
   | 'interaction_started' | 'interaction_completed' | 'object_applied'
   | 'object_discarded' | 'invalid_action' | 'step_completed' | 'activity_completed'
   | 'debrisoft_positioned' | 'solution_applied' | 'debridement_started'
-  | 'debridement_completed' | 'gauze_applied';
+  | 'debridement_completed' | 'gauze_applied' | 'tape_application_started' | 'tape_applied';
 
 export interface ActivityEvent {
   event: ActivityEventName;
