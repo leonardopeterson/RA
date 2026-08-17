@@ -14,7 +14,6 @@ export const TREATMENT_MANIPULATION_SURFACE = {
   height: 0.159,
   radius: 0.072,
   halfStraightLength: 0.105,
-  approachDistance: 0.075,
 } as const;
 
 export interface Workspace {

@@ -17,6 +17,8 @@ const TREATMENT_SURFACE_OFFSET: Record<ObjectId, number> = {
 };
 
 const HEIGHT_SMOOTHING_SPEED = 10;
+const ELEVATION_START_DISTANCE = 0.08;
+const ELEVATION_END_DISTANCE = 0.015;
 
 export class InteractionController {
   private selected?: ObjectId;
@@ -24,6 +26,7 @@ export class InteractionController {
   private drags = new Map<ObjectId, PointerDragBehavior>();
   private currentY = new Map<ObjectId, number>();
   private targetY = new Map<ObjectId, number>();
+  private dragOffset = new Map<ObjectId, Vector3>();
   private lastContact?: Vector3;
 
   constructor(private scene: Scene, private workspace: Workspace, private activity: Activity, private ui: UI) {
@@ -84,17 +87,27 @@ export class InteractionController {
   private setupDrag(id: ObjectId): void {
     const mesh = this.workspace.pickables.get(id)!;
     const drag = new PointerDragBehavior({ dragPlaneNormal: Vector3.Up() });
-    drag.moveAttached = true;
+    // X/Z and the automatic Y are both applied here. Babylon must not write a
+    // competing position while the pointer remains down.
+    drag.moveAttached = false;
     drag.useObjectOrientationForDragging = false;
     drag.enabled = false;
     mesh.addBehavior(drag);
-    drag.onDragStartObservable.add(() => {
+    drag.onDragStartObservable.add((event) => {
       this.lastContact = undefined;
       this.currentY.set(id, mesh.position.y);
       this.targetY.set(id, this.calculateTargetY(id, mesh.position));
+      const pointerPosition = this.toWorkspaceLocal(event.dragPlanePoint);
+      this.dragOffset.set(id, new Vector3(mesh.position.x - pointerPosition.x, 0, mesh.position.z - pointerPosition.z));
     });
-    drag.onDragObservable.add(() => this.validateMove(id));
-    drag.onDragEndObservable.add(() => this.validateMove(id));
+    drag.onDragObservable.add((event) => {
+      const pointerPosition = this.toWorkspaceLocal(event.dragPlanePoint);
+      const offset = this.dragOffset.get(id) ?? Vector3.Zero();
+      mesh.position.x = pointerPosition.x + offset.x;
+      mesh.position.z = pointerPosition.z + offset.z;
+      this.validateMove(id);
+      this.updateObjectHeight(id);
+    });
     this.drags.set(id, drag);
   }
 
@@ -141,22 +154,31 @@ export class InteractionController {
     const distanceX = localPosition.x - surface.centerX;
     const distanceZ = Math.max(Math.abs(localPosition.z - surface.centerZ) - surface.halfStraightLength, 0);
     const distanceFromBody = Math.hypot(distanceX, distanceZ) - surface.radius;
-    if (distanceFromBody <= 0) return 1;
-    if (distanceFromBody >= surface.approachDistance) return 0;
-    const proximity = 1 - distanceFromBody / surface.approachDistance;
+    const proximity = Math.max(0, Math.min(1,
+      (ELEVATION_START_DISTANCE - distanceFromBody)
+      / (ELEVATION_START_DISTANCE - ELEVATION_END_DISTANCE),
+    ));
     return proximity * proximity * (3 - 2 * proximity);
   }
 
   private updateAutomaticHeights(): void {
+    for (const id of this.targetY.keys()) this.updateObjectHeight(id);
+  }
+
+  private updateObjectHeight(id: ObjectId): void {
     const deltaSeconds = Math.min(this.scene.getEngine().getDeltaTime() / 1000, 0.05);
     const smoothing = 1 - Math.exp(-HEIGHT_SMOOTHING_SPEED * deltaSeconds);
-    for (const [id, targetY] of this.targetY) {
-      const mesh = this.workspace.pickables.get(id)!;
-      const currentY = this.currentY.get(id) ?? mesh.position.y;
-      const nextY = currentY + (targetY - currentY) * smoothing;
-      this.currentY.set(id, nextY);
-      mesh.position.y = nextY;
-    }
+    const mesh = this.workspace.pickables.get(id)!;
+    const targetY = this.targetY.get(id) ?? this.calculateTargetY(id, mesh.position);
+    const currentY = this.currentY.get(id) ?? mesh.position.y;
+    const nextY = currentY + (targetY - currentY) * smoothing;
+    this.currentY.set(id, nextY);
+    mesh.position.y = nextY;
+  }
+
+  private toWorkspaceLocal(worldPosition: Vector3): Vector3 {
+    this.workspace.root.computeWorldMatrix(true);
+    return Vector3.TransformCoordinates(worldPosition, Matrix.Invert(this.workspace.root.getWorldMatrix()));
   }
 
   private objectId(mesh: AbstractMesh): ObjectId | undefined {
