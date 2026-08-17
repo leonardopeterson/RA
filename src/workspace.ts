@@ -93,7 +93,8 @@ export function createWorkspace(scene: Scene): Workspace {
   tag([cover], 'cover');
 
   const attachExternalModel = (file: string, holder: AbstractMesh, id: ObjectId, fallback: AbstractMesh[]) => {
-    void SceneLoader.ImportMeshAsync('', '/models/', file, scene).then(({ meshes }) => {
+    const modelsRoot = `${import.meta.env.BASE_URL}models/`;
+    void SceneLoader.ImportMeshAsync('', modelsRoot, file, scene).then(({ meshes }) => {
       if (!meshes.length) return;
       meshes[0].parent = holder;
       meshes.forEach((mesh) => tag([mesh], id));
