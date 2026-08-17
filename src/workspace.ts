@@ -114,9 +114,17 @@ export function createWorkspace(scene: Scene): Workspace {
       lowerLeg.setEnabled(false);
       ankle.setEnabled(false);
       foot.setEnabled(false);
+      const legVisualRoot = new TransformNode('lower-leg-visual-root', scene);
+      legVisualRoot.parent = root;
+      legVisualRoot.position.set(-0.09, 0.0805, -0.19);
+
+      // O GLB veio com a geometria longitudinal no eixo Y.
+      // Rotacionamos apenas o visual para deitá-lo sobre a mesa:
+      // +Y (joelho → pé) passa a apontar para +Z (em direção ao usuário).
+      legVisualRoot.rotation.x = Math.PI / 2;
+
       const legRoot = result.meshes[0];
-      legRoot.parent = root;
-      legRoot.position.set(-0.09, 0.0805, -0.19);
+      legRoot.parent = legVisualRoot;
       result.meshes.forEach((mesh) => {
         mesh.isPickable = false;
       });
