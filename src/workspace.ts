@@ -116,7 +116,7 @@ export function createWorkspace(scene: Scene): Workspace {
       foot.setEnabled(false);
       const legRoot = result.meshes[0];
       legRoot.parent = root;
-      legRoot.position.set(-0.09, 0.094, -0.19);
+      legRoot.position.set(-0.09, 0.0805, -0.19);
       legRoot.rotationQuaternion = null;
       legRoot.rotation.set(0, 0, 0);
       result.meshes.forEach((mesh) => {
