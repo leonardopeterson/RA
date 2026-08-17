@@ -4,12 +4,26 @@ import {
 } from '@babylonjs/core';
 import { Activity, ObjectId } from './activity';
 import type { UI } from './ui';
-import { WORKSPACE, Workspace } from './workspace';
+import { TREATMENT_MANIPULATION_SURFACE, WORKSPACE, Workspace } from './workspace';
+
+const TABLE_SURFACE_OFFSET: Record<ObjectId, number> = {
+  applicator: 0.029,
+  cover: 0.019,
+};
+
+const TREATMENT_SURFACE_OFFSET: Record<ObjectId, number> = {
+  applicator: 0.026,
+  cover: 0.010,
+};
+
+const HEIGHT_SMOOTHING_SPEED = 10;
 
 export class InteractionController {
   private selected?: ObjectId;
   private highlight: HighlightLayer;
   private drags = new Map<ObjectId, PointerDragBehavior>();
+  private currentY = new Map<ObjectId, number>();
+  private targetY = new Map<ObjectId, number>();
   private lastContact?: Vector3;
 
   constructor(private scene: Scene, private workspace: Workspace, private activity: Activity, private ui: UI) {
@@ -17,6 +31,7 @@ export class InteractionController {
     this.highlight.innerGlow = false;
     this.setupDrag('applicator');
     this.setupDrag('cover');
+    this.scene.onBeforeRenderObservable.add(() => this.updateAutomaticHeights());
     this.scene.onPointerObservable.add((pointer) => {
       if (pointer.type !== PointerEventTypes.POINTERPICK || !pointer.pickInfo?.pickedMesh) return;
       const id = this.objectId(pointer.pickInfo.pickedMesh);
@@ -51,6 +66,8 @@ export class InteractionController {
     if (id === 'cover' && this.nearTarget(this.workspace.pickables.get(id)!.position, 0.075)) {
       if (this.activity.applyCover()) {
         this.workspace.pickables.get(id)!.position.copyFrom(this.workspace.coverSnap);
+        this.currentY.set(id, this.workspace.coverSnap.y);
+        this.targetY.set(id, this.workspace.coverSnap.y);
         this.drags.get(id)!.enabled = false;
         this.ui.notify('Cobertura posicionada corretamente.', 'success');
       }
@@ -71,7 +88,11 @@ export class InteractionController {
     drag.useObjectOrientationForDragging = false;
     drag.enabled = false;
     mesh.addBehavior(drag);
-    drag.onDragStartObservable.add(() => { this.lastContact = undefined; });
+    drag.onDragStartObservable.add(() => {
+      this.lastContact = undefined;
+      this.currentY.set(id, mesh.position.y);
+      this.targetY.set(id, this.calculateTargetY(id, mesh.position));
+    });
     drag.onDragObservable.add(() => this.validateMove(id));
     drag.onDragEndObservable.add(() => this.validateMove(id));
     this.drags.set(id, drag);
@@ -81,13 +102,13 @@ export class InteractionController {
     const mesh = this.workspace.pickables.get(id)!;
     mesh.position.x = Math.max(-WORKSPACE.halfWidth + 0.025, Math.min(WORKSPACE.halfWidth - 0.025, mesh.position.x));
     mesh.position.z = Math.max(-WORKSPACE.halfDepth + 0.025, Math.min(WORKSPACE.halfDepth - 0.025, mesh.position.z));
-    mesh.position.y = id === 'applicator' ? 0.175 : 0.07;
+    this.targetY.set(id, this.calculateTargetY(id, mesh.position));
+    mesh.position.y = this.currentY.get(id) ?? mesh.position.y;
 
-    if (id === 'applicator' && this.nearTarget(mesh.position, 0.09)) {
-      mesh.position.y = 0.185;
+    if (id === 'applicator' && this.surfaceBlend(mesh.position) >= 0.98 && this.nearTarget(mesh.position, 0.09)) {
       const current = mesh.position.clone();
       if (this.lastContact) {
-        const distance = Vector3.Distance(current, this.lastContact);
+        const distance = Math.hypot(current.x - this.lastContact.x, current.z - this.lastContact.z);
         if (distance < 0.06 && this.activity.addTreatmentMotion(distance)) {
           this.drags.get(id)!.enabled = false;
           this.ui.notify('Área preparada. Agora aplique a cobertura.', 'success');
@@ -106,7 +127,36 @@ export class InteractionController {
 
   private snapToSafeSurface(id: ObjectId): void {
     const mesh = this.workspace.pickables.get(id)!;
-    mesh.position.y = id === 'applicator' ? 0.055 : 0.045;
+    this.targetY.set(id, this.calculateTargetY(id, mesh.position));
+  }
+
+  private calculateTargetY(id: ObjectId, localPosition: Vector3): number {
+    const tableY = WORKSPACE.surfaceY + TABLE_SURFACE_OFFSET[id];
+    const treatmentY = TREATMENT_MANIPULATION_SURFACE.height + TREATMENT_SURFACE_OFFSET[id];
+    return tableY + (treatmentY - tableY) * this.surfaceBlend(localPosition);
+  }
+
+  private surfaceBlend(localPosition: Vector3): number {
+    const surface = TREATMENT_MANIPULATION_SURFACE;
+    const distanceX = localPosition.x - surface.centerX;
+    const distanceZ = Math.max(Math.abs(localPosition.z - surface.centerZ) - surface.halfStraightLength, 0);
+    const distanceFromBody = Math.hypot(distanceX, distanceZ) - surface.radius;
+    if (distanceFromBody <= 0) return 1;
+    if (distanceFromBody >= surface.approachDistance) return 0;
+    const proximity = 1 - distanceFromBody / surface.approachDistance;
+    return proximity * proximity * (3 - 2 * proximity);
+  }
+
+  private updateAutomaticHeights(): void {
+    const deltaSeconds = Math.min(this.scene.getEngine().getDeltaTime() / 1000, 0.05);
+    const smoothing = 1 - Math.exp(-HEIGHT_SMOOTHING_SPEED * deltaSeconds);
+    for (const [id, targetY] of this.targetY) {
+      const mesh = this.workspace.pickables.get(id)!;
+      const currentY = this.currentY.get(id) ?? mesh.position.y;
+      const nextY = currentY + (targetY - currentY) * smoothing;
+      this.currentY.set(id, nextY);
+      mesh.position.y = nextY;
+    }
   }
 
   private objectId(mesh: AbstractMesh): ObjectId | undefined {

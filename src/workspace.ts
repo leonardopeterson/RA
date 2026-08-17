@@ -6,6 +6,17 @@ import type { ObjectId } from './activity';
 
 export const WORKSPACE = { halfWidth: 0.28, halfDepth: 0.20, surfaceY: 0.026 } as const;
 
+// Logical manipulation surface. It is intentionally independent from the limb mesh,
+// so replacing the visual model only requires tuning these measurements in meters.
+export const TREATMENT_MANIPULATION_SURFACE = {
+  centerX: -0.09,
+  centerZ: 0,
+  height: 0.159,
+  radius: 0.072,
+  halfStraightLength: 0.105,
+  approachDistance: 0.075,
+} as const;
+
 export interface Workspace {
   root: TransformNode;
   placementIndicator: Mesh;
