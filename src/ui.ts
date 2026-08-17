@@ -54,30 +54,30 @@ export class UI {
   showPlacement(): void {
     element('step-number').textContent = 'POSICIONAMENTO';
     element('instruction').textContent = 'Aponte para uma superfície e toque para posicionar.';
-    element('progress-label').textContent = '0 / 6';
+    element('progress-label').textContent = '0 / 7';
     element<HTMLElement>('progress-bar').style.width = '0%';
     element('selection-card').classList.add('hidden');
     element('reposition').classList.add('hidden');
   }
 
   update(snapshot: ActivitySnapshot): void {
-    const shownStep = Math.min(snapshot.step + 1, 6);
-    element('step-number').textContent = snapshot.phaseCompleted ? 'PRIMEIRA CAMADA CONCLUÍDA' : `ETAPA ${shownStep}`;
+    const shownStep = Math.min(snapshot.step + 1, 7);
+    element('step-number').textContent = snapshot.completed ? 'CURATIVO CONCLUÍDO' : `ETAPA ${shownStep}`;
     element('instruction').textContent = snapshot.instruction;
-    element('progress-label').textContent = `${Math.min(snapshot.step, 6)} / 6`;
-    element<HTMLElement>('progress-bar').style.width = `${Math.min(snapshot.step / 6, 1) * 100}%`;
+    element('progress-label').textContent = `${Math.min(snapshot.step, 7)} / 7`;
+    element<HTMLElement>('progress-bar').style.width = `${Math.min(snapshot.step / 7, 1) * 100}%`;
     const counter = element('treatment-counter');
-    counter.classList.toggle('hidden', snapshot.step !== 2 && snapshot.step !== 5);
+    counter.classList.toggle('hidden', snapshot.step !== 2 && snapshot.step !== 5 && snapshot.step !== 6);
     const counterLabel = counter.querySelector('span')!;
-    if (snapshot.step === 5) {
-      counterLabel.textContent = 'Faixa 1';
+    if (snapshot.step === 5 || snapshot.step === 6) {
+      counterLabel.textContent = snapshot.step === 5 ? 'Faixa 1' : 'Faixa 2';
       element('counter-value').textContent = `Voltas: ${snapshot.wrapCount} / ${snapshot.wrapTarget}`;
     } else {
       counterLabel.textContent = 'Debridamento';
       element('counter-value').textContent = `${snapshot.debridementSeconds.toFixed(1)} / ${snapshot.debridementTargetSeconds.toFixed(0)} s`;
     }
     element('reposition').classList.remove('hidden');
-    element('finish').classList.add('hidden');
+    element('finish').classList.toggle('hidden', !snapshot.completed);
   }
 
   showSelection(id: ObjectId, name: string, state: ObjectState, held: boolean, canPick: boolean): void {

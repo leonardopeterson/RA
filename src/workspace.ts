@@ -2,9 +2,11 @@ import {
   AbstractMesh, Color3, Mesh, MeshBuilder, PBRMaterial, Scene, StandardMaterial,
   TransformNode, Vector3,
 } from '@babylonjs/core';
-import { OBJECT_INITIAL_POSES, type ObjectId } from './activity';
+import { OBJECT_INITIAL_POSES, type BandageId, type ObjectId } from './activity';
 
 export const WORKSPACE = { halfWidth: 0.28, halfDepth: 0.20, surfaceY: 0.026 } as const;
+export const BANDAGE_LAYER_1_DIAMETER = 0.147;
+export const BANDAGE_LAYER_2_RADIAL_OFFSET = 0.014;
 
 // Logical surface data remains independent from the provisional leg meshes.
 export const TREATMENT_MANIPULATION_SURFACE = {
@@ -45,8 +47,8 @@ export interface Workspace {
   tapeZones: TapeZones;
   tapeSnap: Vector3;
   bandageZones: BandageZones;
-  bandageRestartPose: Vector3;
-  bandageLayerSegments: Mesh[];
+  bandageRestartPoses: Record<BandageId, Vector3>;
+  bandageLayerSegments: Record<BandageId, Mesh[]>;
   resetObjects(): void;
 }
 
@@ -156,21 +158,32 @@ export function createWorkspace(scene: Scene): Workspace {
   bandage.material = material(scene, 'bandage-roll-material', '#f0e6cf', 0.9);
   tag([bandage], 'bandage-1');
 
-  const layerMaterial = material(scene, 'bandage-layer-1-material', '#eee3cb', 0.94);
-  const bandageLayerSegments = Array.from({ length: 10 }, (_, index) => {
-    const segment = MeshBuilder.CreateTorus(`bandage-layer-1-segment-${index + 1}`, {
-      diameter: 0.147,
+  const bandage2 = MeshBuilder.CreateCylinder('bandage-2', { height: 0.055, diameter: 0.052, tessellation: 28 }, scene);
+  bandage2.parent = root;
+  bandage2.material = material(scene, 'bandage-roll-2-material', '#d9e7e5', 0.9);
+  tag([bandage2], 'bandage-2');
+
+  const createBandageLayer = (layer: 1 | 2, diameter: number, zStart: number, color: string) => {
+    const layerMaterial = material(scene, `bandage-layer-${layer}-material`, color, 0.94);
+    return Array.from({ length: 10 }, (_, index) => {
+      const segment = MeshBuilder.CreateTorus(`bandage-layer-${layer}-segment-${index + 1}`, {
+      diameter,
       thickness: 0.012,
       tessellation: 32,
     }, scene);
     segment.parent = root;
     segment.rotation.x = Math.PI / 2;
-    segment.position.set(-0.09, 0.094, 0.09 - index * 0.02);
+    segment.position.set(-0.09, 0.094, zStart - index * 0.02);
     segment.material = layerMaterial;
     segment.isPickable = false;
     segment.setEnabled(false);
     return segment;
-  });
+    });
+  };
+  const bandageLayerSegments: Record<BandageId, Mesh[]> = {
+    'bandage-1': createBandageLayer(1, BANDAGE_LAYER_1_DIAMETER, 0.09, '#eee3cb'),
+    'bandage-2': createBandageLayer(2, BANDAGE_LAYER_1_DIAMETER + BANDAGE_LAYER_2_RADIAL_OFFSET, 0.085, '#d8e8e5'),
+  };
 
   const pickables = new Map<ObjectId, AbstractMesh>([
     ['debrisoft-pad', debrisoft],
@@ -178,6 +191,7 @@ export function createWorkspace(scene: Scene): Workspace {
     ['gauze', gauze],
     ['tape-strip', tape],
     ['bandage-1', bandage],
+    ['bandage-2', bandage2],
   ]);
 
   const resetObjects = () => {
@@ -208,14 +222,13 @@ export function createWorkspace(scene: Scene): Workspace {
     halfWidth: 0.023,
     halfDepth: 0.06,
   };
-  const bandageRestartPose = new Vector3(
-    bandageZones.right.x,
-    TREATMENT_MANIPULATION_SURFACE.height + 0.035,
-    bandageZones.right.z,
-  );
+  const bandageRestartPoses: Record<BandageId, Vector3> = {
+    'bandage-1': new Vector3(bandageZones.right.x, TREATMENT_MANIPULATION_SURFACE.height + 0.035, bandageZones.right.z),
+    'bandage-2': new Vector3(bandageZones.right.x, TREATMENT_MANIPULATION_SURFACE.height + 0.043, bandageZones.right.z),
+  };
   return {
     root, placementIndicator: indicator, pickables, treatmentSurface: treatment,
     treatmentSnap, solutionZone, tapeZones, tapeSnap, bandageZones,
-    bandageRestartPose, bandageLayerSegments, resetObjects,
+    bandageRestartPoses, bandageLayerSegments, resetObjects,
   };
 }

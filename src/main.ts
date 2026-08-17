@@ -59,7 +59,13 @@ ui.bind({
   },
   pick: () => interaction.pickSelected(),
   release: () => interaction.releaseSelected(),
-  finish: () => ui.notify('A próxima fase do curativo ainda será implementada.', 'info'),
+  finish: () => {
+    if (!activity.finish()) {
+      ui.notify('Ainda há etapas pendentes.', 'error');
+      return;
+    }
+    ui.showSummary(events.count('invalid_action'), Date.now() - events.startedAt);
+  },
   restart: () => location.reload(),
 });
 

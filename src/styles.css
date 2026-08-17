@@ -62,6 +62,8 @@ p { color: #b7cec6; line-height: 1.55; }
 .hud-footer { position: absolute; bottom: 14px; display: flex; gap: 10px; width: min(92vw, 520px); justify-content: center; }
 
 .summary { text-align: center; }
+.completion-list { display: grid; gap: 7px; margin: 20px 0; text-align: left; color: #cce3db; font-size: 13px; }
+.completion-list span { padding: 8px 11px; border-radius: 9px; background: rgba(255,255,255,.035); }
 .success-icon { display: grid; place-items: center; width: 64px; height: 64px; margin: 0 auto 20px; border-radius: 50%; color: #04251b; background: var(--green); font-size: 32px; font-weight: 800; }
 .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 26px 0; }
 .metrics div { padding: 14px 5px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,255,255,.03); }

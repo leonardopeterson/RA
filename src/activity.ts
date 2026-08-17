@@ -1,7 +1,8 @@
 import { EventLog } from './events';
 
 export type ObjectState = 'available' | 'positioned' | 'wet' | 'applying' | 'returned' | 'used' | 'applied' | 'wrapping' | 'completed';
-export type ObjectId = 'debrisoft-pad' | 'solution-bottle' | 'gauze' | 'tape-strip' | 'bandage-1';
+export type BandageId = 'bandage-1' | 'bandage-2';
+export type ObjectId = 'debrisoft-pad' | 'solution-bottle' | 'gauze' | 'tape-strip' | BandageId;
 
 export interface InitialPose {
   position: readonly [number, number, number];
@@ -14,6 +15,7 @@ export const OBJECT_INITIAL_POSES: Record<ObjectId, InitialPose> = {
   gauze: { position: [0.17, 0.044, 0.105], rotation: [0, 0, 0] },
   'tape-strip': { position: [0.17, 0.043, 0.155], rotation: [0, 0, 0] },
   'bandage-1': { position: [0.245, 0.064, -0.145], rotation: [0, 0, Math.PI / 2] },
+  'bandage-2': { position: [0.245, 0.067, -0.075], rotation: [0, 0, Math.PI / 2] },
 };
 
 export interface ActivityObjectState extends InitialPose {
@@ -30,6 +32,7 @@ export interface ActivitySnapshot {
   debridementSeconds: number;
   debridementTargetSeconds: number;
   phaseCompleted: boolean;
+  completed: boolean;
   wrapCount: number;
   wrapTarget: number;
 }
@@ -42,7 +45,8 @@ const instructions = [
   'Posicione a gaze sobre a região tratada.',
   'Fixe a gaze com o esparadrapo.',
   'Enrole a primeira faixa ao redor do membro.',
-  'Primeira camada concluída. A segunda faixa será adicionada na próxima fase.',
+  'Aplique a segunda faixa ao redor do membro.',
+  'Curativo concluído. Finalize para visualizar o resumo.',
 ];
 
 const BANDAGE_WRAP_TARGET = 10;
@@ -54,13 +58,15 @@ export class Activity {
     ['gauze', { id: 'gauze', name: 'Gaze', state: 'available', tableOffset: 0.018, treatmentOffset: 0.014, ...OBJECT_INITIAL_POSES.gauze }],
     ['tape-strip', { id: 'tape-strip', name: 'Esparadrapo', state: 'available', tableOffset: 0.017, treatmentOffset: 0.022, ...OBJECT_INITIAL_POSES['tape-strip'] }],
     ['bandage-1', { id: 'bandage-1', name: 'Faixa 1', state: 'available', tableOffset: 0.038, treatmentOffset: 0.035, ...OBJECT_INITIAL_POSES['bandage-1'] }],
+    ['bandage-2', { id: 'bandage-2', name: 'Faixa 2', state: 'available', tableOffset: 0.041, treatmentOffset: 0.043, ...OBJECT_INITIAL_POSES['bandage-2'] }],
   ]);
   step = 0;
   debridementSeconds = 0;
   phaseCompleted = false;
   private heldId?: ObjectId;
   private debridementStarted = false;
-  wrapCount = 0;
+  readonly wrapCounts: Record<BandageId, number> = { 'bandage-1': 0, 'bandage-2': 0 };
+  completed = false;
 
   constructor(readonly events: EventLog) {}
 
@@ -73,7 +79,8 @@ export class Activity {
       debridementSeconds: this.debridementSeconds,
       debridementTargetSeconds: DEBRIDEMENT_TARGET_SECONDS,
       phaseCompleted: this.phaseCompleted,
-      wrapCount: this.wrapCount,
+      completed: this.completed,
+      wrapCount: this.step === 6 ? this.wrapCounts['bandage-2'] : this.wrapCounts['bandage-1'],
       wrapTarget: BANDAGE_WRAP_TARGET,
     };
   }
@@ -97,6 +104,8 @@ export class Activity {
       || (id === 'tape-strip' && this.step === 4 && this.objects.get('gauze')!.state === 'applied'
         && this.objects.get(id)!.state === 'available')
       || (id === 'bandage-1' && this.step === 5 && this.objects.get('tape-strip')!.state === 'applied'
+        && (this.objects.get(id)!.state === 'available' || this.objects.get(id)!.state === 'wrapping'))
+      || (id === 'bandage-2' && this.step === 6 && this.objects.get('bandage-1')!.state === 'completed'
         && (this.objects.get(id)!.state === 'available' || this.objects.get(id)!.state === 'wrapping')),
     );
   }
@@ -197,35 +206,61 @@ export class Activity {
     return true;
   }
 
-  beginBandageWrapping(): boolean {
-    const bandage = this.objects.get('bandage-1')!;
-    if (this.step !== 5 || !this.isHeld('bandage-1') || this.objects.get('tape-strip')!.state !== 'applied') {
-      return this.invalid('bandage-1', 'Conclua a fixação com esparadrapo antes de usar a faixa.');
+  beginBandageWrapping(id: BandageId): boolean {
+    const bandage = this.objects.get(id)!;
+    const expectedStep = id === 'bandage-1' ? 5 : 6;
+    const prerequisiteMet = id === 'bandage-1'
+      ? this.objects.get('tape-strip')!.state === 'applied'
+      : this.objects.get('bandage-1')!.state === 'completed';
+    if (this.step !== expectedStep || !this.isHeld(id) || !prerequisiteMet) {
+      return this.invalid(id, id === 'bandage-1'
+        ? 'Conclua a fixação com esparadrapo antes de usar a faixa.'
+        : 'Conclua a primeira faixa antes de usar a segunda.');
     }
     if (bandage.state === 'available') {
       bandage.state = 'wrapping';
-      this.events.emit('bandage_wrap_started', { object: 'bandage-1', target: 'lower-leg', step: 6 });
+      this.events.emit('bandage_wrap_started', { object: id, target: 'lower-leg', step: expectedStep + 1 });
     }
     return true;
   }
 
-  completeBandageWrap(): boolean {
-    if (this.step !== 5 || !this.isHeld('bandage-1') || this.objects.get('bandage-1')!.state !== 'wrapping') {
-      return this.invalid('bandage-1', 'Complete a sequência direita, centro, esquerda e retorno.');
+  completeBandageWrap(id: BandageId): boolean {
+    const expectedStep = id === 'bandage-1' ? 5 : 6;
+    if (this.step !== expectedStep || !this.isHeld(id) || this.objects.get(id)!.state !== 'wrapping') {
+      return this.invalid(id, 'Complete a sequência direita, centro, esquerda e retorno.');
     }
-    this.wrapCount = Math.min(BANDAGE_WRAP_TARGET, this.wrapCount + 1);
-    this.events.emit('bandage_wrap_completed', { object: 'bandage-1', target: 'lower-leg', step: 6, wrap: this.wrapCount });
-    if (this.wrapCount < BANDAGE_WRAP_TARGET) return false;
-    this.objects.get('bandage-1')!.state = 'completed';
-    this.release('bandage-1');
-    this.events.emit('bandage_layer_completed', { object: 'bandage-1', target: 'lower-leg', step: 6, wrap: this.wrapCount });
+    this.wrapCounts[id] = Math.min(BANDAGE_WRAP_TARGET, this.wrapCounts[id] + 1);
+    this.events.emit('bandage_wrap_completed', { object: id, target: 'lower-leg', step: expectedStep + 1, wrap: this.wrapCounts[id] });
+    if (this.wrapCounts[id] < BANDAGE_WRAP_TARGET) return false;
+    this.objects.get(id)!.state = 'completed';
+    this.release(id);
+    this.events.emit('bandage_layer_completed', { object: id, target: 'lower-leg', step: expectedStep + 1, wrap: this.wrapCounts[id] });
     this.advance();
-    this.phaseCompleted = true;
+    if (id === 'bandage-2') this.completeActivity();
     return true;
   }
 
-  cancelBandagePass(): void {
-    this.release('bandage-1');
+  cancelBandagePass(id: BandageId): void {
+    this.release(id);
+  }
+
+  finish(): boolean {
+    return this.completed;
+  }
+
+  private completeActivity(): void {
+    if (this.completed) return;
+    const ready = this.objects.get('debrisoft-pad')!.state === 'used'
+      && this.objects.get('solution-bottle')!.state === 'returned'
+      && this.objects.get('gauze')!.state === 'applied'
+      && this.objects.get('tape-strip')!.state === 'applied'
+      && this.objects.get('bandage-1')!.state === 'completed'
+      && this.objects.get('bandage-2')!.state === 'completed'
+      && this.debridementSeconds >= DEBRIDEMENT_TARGET_SECONDS;
+    if (!ready) return;
+    this.completed = true;
+    this.phaseCompleted = true;
+    this.events.emit('activity_completed', { step: 7 });
   }
 
   private advance(): void {
@@ -238,6 +273,7 @@ export class Activity {
     if (id === 'gauze' && this.step < 3) return 'Conclua o debridamento antes de aplicar a gaze.';
     if (id === 'tape-strip' && this.step < 4) return 'Aplique a gaze antes de usar o esparadrapo.';
     if (id === 'bandage-1' && this.step < 5) return 'Conclua a fixação antes de usar a primeira faixa.';
+    if (id === 'bandage-2' && this.step < 6) return 'Conclua a primeira faixa antes de usar a segunda.';
     if (id === 'debrisoft-pad' && this.step === 1) return 'Aplique a solução antes de iniciar o debridamento.';
     return 'Esse objeto não é necessário nesta etapa.';
   }
