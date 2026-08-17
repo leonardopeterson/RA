@@ -1,5 +1,5 @@
 import {
-  AbstractMesh, Color3, Mesh, MeshBuilder, PBRMaterial, Scene, StandardMaterial,
+  AbstractMesh, Color3, Mesh, MeshBuilder, PBRMaterial, Scene, SceneLoader, StandardMaterial,
   TransformNode, Vector3,
 } from '@babylonjs/core';
 import { OBJECT_INITIAL_POSES, type BandageId, type ObjectId } from './activity';
@@ -86,9 +86,8 @@ export function createWorkspace(scene: Scene): Workspace {
   tray.material = material(scene, 'tray-material', '#829b94', 0.35);
   tray.isPickable = false;
 
-  // Provisional lower leg, ankle and foot. The foot's broad sole faces +Z,
-  // toward the user side of the workspace.
-  const lowerLeg = MeshBuilder.CreateCapsule('lower-leg', { radius: 0.066, height: 0.29, tessellation: 32 }, scene);
+  // Provisional lower leg, ankle and foot fallback representation.
+  const lowerLeg = MeshBuilder.CreateCapsule('lower-leg-fallback', { radius: 0.066, height: 0.29, tessellation: 32 }, scene);
   lowerLeg.parent = root;
   lowerLeg.rotation.x = Math.PI / 2;
   lowerLeg.position.set(-0.09, 0.094, -0.035);
@@ -96,18 +95,40 @@ export function createWorkspace(scene: Scene): Workspace {
   lowerLeg.material = material(scene, 'skin-material', '#d89f83', 0.82);
   lowerLeg.isPickable = false;
 
-  const ankle = MeshBuilder.CreateSphere('ankle', { diameter: 0.12, segments: 24 }, scene);
+  const ankle = MeshBuilder.CreateSphere('ankle-fallback', { diameter: 0.12, segments: 24 }, scene);
   ankle.parent = root;
   ankle.position.set(-0.09, 0.09, 0.112);
   ankle.scaling.z = 0.78;
   ankle.material = lowerLeg.material;
   ankle.isPickable = false;
 
-  const foot = MeshBuilder.CreateBox('foot', { width: 0.13, height: 0.14, depth: 0.055 }, scene);
+  const foot = MeshBuilder.CreateBox('foot-fallback', { width: 0.13, height: 0.14, depth: 0.055 }, scene);
   foot.parent = root;
   foot.position.set(-0.09, 0.105, 0.165);
   foot.material = lowerLeg.material;
   foot.isPickable = false;
+
+  const modelUrl = `${import.meta.env.BASE_URL}models/`;
+  void SceneLoader.ImportMeshAsync('', modelUrl, 'lower-leg-left.glb', scene)
+    .then((result) => {
+      lowerLeg.setEnabled(false);
+      ankle.setEnabled(false);
+      foot.setEnabled(false);
+      const legRoot = result.meshes[0];
+      legRoot.parent = root;
+      legRoot.position.set(-0.09, 0.094, -0.19);
+      legRoot.rotationQuaternion = null;
+      legRoot.rotation.set(0, 0, 0);
+      result.meshes.forEach((mesh) => {
+        mesh.isPickable = false;
+      });
+    })
+    .catch((error) => {
+      console.warn('Falha ao carregar modelo 3D da perna. Mantendo anatomia provisória.', error);
+      lowerLeg.setEnabled(true);
+      ankle.setEnabled(true);
+      foot.setEnabled(true);
+    });
 
   const treatment = MeshBuilder.CreateDisc('TreatmentInteractionSurface', { radius: 0.043, tessellation: 40 }, scene);
   treatment.parent = root;
