@@ -4,6 +4,7 @@ import {
 } from '@babylonjs/core';
 import { Activity, OBJECT_INITIAL_POSES, type BandageId, type ObjectId } from './activity';
 import type { UI } from './ui';
+import { rotationFromUpToNormal } from './anatomySurface';
 import {
   TREATMENT_MANIPULATION_SURFACE, WORKSPACE, type BandageZoneName,
   type TapeZoneName, type Workspace,
@@ -15,6 +16,12 @@ const ELEVATION_END_DISTANCE = 0.015;
 const MIN_MOVEMENT_DISTANCE = 0.0015;
 const MAX_MOVEMENT_SAMPLE_SECONDS = 0.1;
 const TREATMENT_CONTACT_RADIUS = 0.052;
+
+const SURFACE_CONTACT_OFFSETS: Partial<Record<ObjectId, number>> = {
+  'debrisoft-pad': 0.008,
+  'gauze': 0.0035,
+  'tape-strip': 0.006,
+};
 
 type BandagePassState =
   | 'WAIT_RIGHT_START'
@@ -246,8 +253,7 @@ export class InteractionController {
   }
 
   private updateTapeApplication(position: Vector3): void {
-    const safeTapeY = TREATMENT_MANIPULATION_SURFACE.height
-      + this.activity.objects.get('tape-strip')!.treatmentOffset;
+    const safeTapeY = this.surfaceTargetY('tape-strip', position);
     if (this.surfaceBlend(position) < 0.98 || position.y < safeTapeY - 0.008) return;
     const zone = this.tapeZoneAt(position);
     if (!this.tapeStartSide) {
@@ -401,22 +407,51 @@ export class InteractionController {
 
   private placeAtTreatmentSnap(id: ObjectId): void {
     const mesh = this.workspace.pickables.get(id)!;
-    const position = this.workspace.treatmentSnap.clone();
-    position.y = TREATMENT_MANIPULATION_SURFACE.height + this.activity.objects.get(id)!.treatmentOffset;
-    mesh.position.copyFrom(position);
-    this.currentY.set(id, position.y);
-    this.targetY.set(id, position.y);
+    const snap = this.workspace.treatmentSnap;
+    const sample = this.workspace.anatomySurface.sampleTopSurface(snap.x, snap.z);
+
+    if (sample) {
+      const position = sample.point.add(
+        sample.normal.scale(this.surfaceOffsetFor(id)),
+      );
+      mesh.position.copyFrom(position);
+      mesh.rotationQuaternion = rotationFromUpToNormal(sample.normal);
+      this.currentY.set(id, position.y);
+      this.targetY.set(id, position.y);
+    } else {
+      const position = snap.clone();
+      position.y = TREATMENT_MANIPULATION_SURFACE.height
+        + this.activity.objects.get(id)!.treatmentOffset;
+      mesh.position.copyFrom(position);
+      this.currentY.set(id, position.y);
+      this.targetY.set(id, position.y);
+    }
+
     this.drags.get(id)!.enabled = false;
   }
 
   private placeAtTapeSnap(): void {
     const id: ObjectId = 'tape-strip';
     const mesh = this.workspace.pickables.get(id)!;
-    mesh.position.copyFrom(this.workspace.tapeSnap);
-    mesh.rotationQuaternion = null;
-    mesh.rotation.set(...OBJECT_INITIAL_POSES[id].rotation);
-    this.currentY.set(id, this.workspace.tapeSnap.y);
-    this.targetY.set(id, this.workspace.tapeSnap.y);
+    const snap = this.workspace.tapeSnap;
+    const sample = this.workspace.anatomySurface.sampleTopSurface(snap.x, snap.z);
+
+    if (sample) {
+      const position = sample.point.add(
+        sample.normal.scale(this.surfaceOffsetFor(id)),
+      );
+      mesh.position.copyFrom(position);
+      mesh.rotationQuaternion = rotationFromUpToNormal(sample.normal);
+      this.currentY.set(id, position.y);
+      this.targetY.set(id, position.y);
+    } else {
+      mesh.position.copyFrom(this.workspace.tapeSnap);
+      mesh.rotationQuaternion = null;
+      mesh.rotation.set(...OBJECT_INITIAL_POSES[id].rotation);
+      this.currentY.set(id, this.workspace.tapeSnap.y);
+      this.targetY.set(id, this.workspace.tapeSnap.y);
+    }
+
     this.drags.get(id)!.enabled = false;
   }
 
@@ -430,12 +465,32 @@ export class InteractionController {
     this.activeBandage = undefined;
   }
 
+  private surfaceOffsetFor(id: ObjectId): number {
+    return SURFACE_CONTACT_OFFSETS[id]
+      ?? this.activity.objects.get(id)!.treatmentOffset;
+  }
+
+  private surfaceTargetY(id: ObjectId, position: Vector3): number {
+    const sample = this.workspace.anatomySurface.sampleTopSurface(
+      position.x,
+      position.z,
+    );
+
+    if (sample) return sample.point.y + this.surfaceOffsetFor(id);
+
+    return TREATMENT_MANIPULATION_SURFACE.height
+      + this.activity.objects.get(id)!.treatmentOffset;
+  }
+
   private calculateTargetY(id: ObjectId, localPosition: Vector3): number {
     const object = this.activity.objects.get(id)!;
     const tableY = WORKSPACE.surfaceY + object.tableOffset;
+
     if (this.isBandage(id) && this.activeBandage === id
-      && (this.bandagePassState === 'BACK_WAIT_CENTER' || this.bandagePassState === 'BACK_WAIT_RIGHT')) return tableY;
-    const treatmentY = TREATMENT_MANIPULATION_SURFACE.height + object.treatmentOffset;
+      && (this.bandagePassState === 'BACK_WAIT_CENTER'
+        || this.bandagePassState === 'BACK_WAIT_RIGHT')) return tableY;
+
+    const treatmentY = this.surfaceTargetY(id, localPosition);
     return tableY + (treatmentY - tableY) * this.surfaceBlend(localPosition);
   }
 
@@ -456,7 +511,7 @@ export class InteractionController {
   }
 
   private isNearSolutionZone(position: Vector3): boolean {
-    const safeBottleY = TREATMENT_MANIPULATION_SURFACE.height + this.activity.objects.get('solution-bottle')!.treatmentOffset;
+    const safeBottleY = this.surfaceTargetY('solution-bottle', position);
     return this.surfaceBlend(position) >= 0.98
       && position.y >= safeBottleY - 0.008
       && Math.hypot(position.x - this.workspace.solutionZone.x, position.z - this.workspace.solutionZone.z) <= 0.055;
