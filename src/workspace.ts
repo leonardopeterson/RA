@@ -106,6 +106,7 @@ export interface BandageZones {
 export interface Workspace {
   root: TransformNode;
   anatomySurface: AnatomySurface;
+  anatomyReady: Promise<void>;
   placementIndicator: Mesh;
   pickables: Map<ObjectId, AbstractMesh>;
   treatmentSurface: Mesh;
@@ -414,7 +415,8 @@ export function createWorkspace(scene: Scene): Workspace {
   ankle.material = lowerLeg.material;
   ankle.isPickable = false;
 
-  anatomySurface.setMeshes([lowerLeg, ankle]);
+  lowerLeg.setEnabled(false);
+  ankle.setEnabled(false);
 
   const treatmentVisualAnchor = new TransformNode('treatment-visual-anchor', scene);
   treatmentVisualAnchor.parent = root;
@@ -970,12 +972,10 @@ export function createWorkspace(scene: Scene): Workspace {
     resetTapeStrips();
   };
 
-  // Configura a anatomia provisória imediatamente, depois refaz tudo com o GLB real.
-  updateAnatomyDependentAnchors();
-
-  void SceneLoader.ImportMeshAsync('', MODEL_ROOT, MODELS.anatomy, scene)
+  let legVisualRoot: TransformNode | undefined;
+  const anatomyReady = SceneLoader.ImportMeshAsync('', MODEL_ROOT, MODELS.anatomy, scene)
     .then((result) => {
-      const legVisualRoot = new TransformNode('lower-leg-visual-root', scene);
+      legVisualRoot = new TransformNode('lower-leg-visual-root', scene);
       legVisualRoot.parent = root;
 
       // Transformação já validada visualmente durante a calibração anterior.
@@ -1031,18 +1031,19 @@ export function createWorkspace(scene: Scene): Workspace {
 
       legOrientationRoot.computeWorldMatrix(true);
       anatomyMeshes.forEach((mesh) => mesh.computeWorldMatrix(true));
-      anatomySurface.setMeshes(anatomyMeshes);
-      updateAnatomyDependentAnchors();
-
-      lowerLeg.setEnabled(false);
-      ankle.setEnabled(false);
+      return anatomyMeshes;
     })
     .catch((error) => {
-      console.warn('Falha ao carregar lower-leg-left.glb; mantendo anatomia provisória.', error);
-      anatomySurface.setMeshes([lowerLeg, ankle]);
-      updateAnatomyDependentAnchors();
+      console.warn('Falha ao carregar lower-leg-left.glb; usando anatomia provisória.', error);
+      legVisualRoot?.dispose(false, true);
+      legVisualRoot = undefined;
       lowerLeg.setEnabled(true);
       ankle.setEnabled(true);
+      return [lowerLeg, ankle];
+    })
+    .then((anatomyMeshes) => {
+      anatomySurface.setMeshes(anatomyMeshes);
+      updateAnatomyDependentAnchors();
     });
 
   resetObjects();
@@ -1051,6 +1052,7 @@ export function createWorkspace(scene: Scene): Workspace {
   return {
     root,
     anatomySurface,
+    anatomyReady,
     placementIndicator: indicator,
     pickables,
     treatmentSurface: treatment,

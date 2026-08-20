@@ -42,6 +42,7 @@ const ar = new ARController(context.scene, workspace, ui, placedWorkspace);
 ui.bind({
   enterAR: async () => {
     try {
+      await workspace.anatomyReady;
       ui.showExperience(true);
       ui.showPlacement();
       await ar.enter();
@@ -52,7 +53,8 @@ ui.bind({
     }
   },
 
-  demo: () => {
+  demo: async () => {
+    await workspace.anatomyReady;
     demoMode = true;
     context.scene.clearColor.set(0, 0, 0, 1);
     ui.showExperience(false);
@@ -88,6 +90,7 @@ ui.bind({
 });
 
 void ar.isSupported().then((supported) => ui.setSupport(supported));
+void workspace.anatomyReady.then(() => ui.setAssetsReady(true));
 
 context.scene.onBeforeRenderObservable.add(() => {
   if (!placed) return;

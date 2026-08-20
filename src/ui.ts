@@ -24,11 +24,14 @@ export class UI {
   private hud = element<HTMLElement>('hud');
   private summary = element<HTMLElement>('summary');
   private enter = element<HTMLButtonElement>('enter-ar');
+  private demo = element<HTMLButtonElement>('demo-mode');
   private feedbackTimer?: number;
+  private assetsReady = false;
+  private webxrSupported = false;
 
   bind(callbacks: UiCallbacks): void {
     this.enter.onclick = callbacks.enterAR;
-    element('demo-mode').onclick = callbacks.demo;
+    this.demo.onclick = callbacks.demo;
     element('exit-ar').onclick = callbacks.exitAR;
     element('reposition').onclick = callbacks.reposition;
     element('finish').onclick = callbacks.finish;
@@ -39,8 +42,13 @@ export class UI {
   private callbacks?: UiCallbacks;
 
   setSupport(supported: boolean, _message?: string): void {
-    this.enter.disabled = !supported;
-    this.enter.setAttribute('aria-disabled', String(!supported));
+    this.webxrSupported = supported;
+    this.updateWelcomeAvailability();
+  }
+
+  setAssetsReady(ready: boolean): void {
+    this.assetsReady = ready;
+    this.updateWelcomeAvailability();
   }
 
   showExperience(isXR: boolean): void {
@@ -140,5 +148,12 @@ export class UI {
 
     const seconds = Math.floor(elapsedMs / 1000);
     element('summary-time').textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+  }
+
+  private updateWelcomeAvailability(): void {
+    this.enter.disabled = !this.assetsReady || !this.webxrSupported;
+    this.demo.disabled = !this.assetsReady;
+    this.enter.setAttribute('aria-disabled', String(this.enter.disabled));
+    this.demo.setAttribute('aria-disabled', String(this.demo.disabled));
   }
 }
