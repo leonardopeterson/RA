@@ -18,14 +18,23 @@ const interaction = new InteractionController(context.scene, workspace, activity
 
 let placed = false;
 let demoMode = false;
+let activityStarted = false;
 
 const placedWorkspace = () => {
   placed = true;
-  workspace.resetObjects();
   events.emit('workspace_placed');
-  events.emit('activity_started', { step: 1 });
+  if (!activityStarted) {
+    workspace.resetObjects();
+    events.emit('activity_started', { step: 1 });
+    activityStarted = true;
+  }
   ui.update(activity.snapshot);
-  ui.notify('Estação posicionada. Selecione o Debrisoft.', 'success');
+  ui.notify(
+    activity.step === 0
+      ? 'Estação posicionada. Selecione o Debrisoft.'
+      : 'Estação reposicionada. Continue a atividade.',
+    'success',
+  );
 };
 
 const ar = new ARController(context.scene, workspace, ui, placedWorkspace);
@@ -42,30 +51,39 @@ ui.bind({
       window.setTimeout(() => location.reload(), 1800);
     }
   },
+
   demo: () => {
     demoMode = true;
+    context.scene.clearColor.set(0, 0, 0, 1);
     ui.showExperience(false);
     ar.placeDemo();
   },
+
   exitAR: () => void ar.exit(),
+
   reposition: () => {
     if (demoMode) {
       ui.notify('No modo demonstração, arraste a cena para observá-la.', 'info');
       return;
     }
+
     placed = false;
     ui.clearSelection();
     ar.armPlacement();
   },
+
   pick: () => interaction.pickSelected(),
   release: () => interaction.releaseSelected(),
+
   finish: () => {
     if (!activity.finish()) {
       ui.notify('Ainda há etapas pendentes.', 'error');
       return;
     }
+
     ui.showSummary(events.count('invalid_action'), Date.now() - events.startedAt);
   },
+
   restart: () => location.reload(),
 });
 

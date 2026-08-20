@@ -3,41 +3,52 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
-    <meta name="theme-color" content="#071814" />
+    <meta name="theme-color" content="#000000" />
     <title>Estação Clínica AR</title>
   </head>
   <body>
     <canvas id="render-canvas"></canvas>
+
     <div id="dom-overlay" class="app-shell">
-      <header class="topbar">
-        <div class="brand"><span class="brand-mark">+</span><span>Treinamento AR</span></div>
+      <header id="topbar" class="topbar hidden">
+        <div class="brand">
+          <span class="brand-mark">+</span>
+          <span>Treinamento AR</span>
+        </div>
         <button id="exit-ar" class="ghost hidden" type="button">Sair da RA</button>
       </header>
 
-      <main id="welcome" class="welcome panel">
-        <div class="eyebrow">PROTÓTIPO WEBXR</div>
-        <h1>Estação clínica<br /><span>na sua frente.</span></h1>
-        <p>Posicione uma atividade prática sobre uma superfície real e conclua uma sequência curta com objetos virtuais.</p>
-        <div id="support-status" class="support checking"><span></span> Verificando compatibilidade…</div>
-        <button id="enter-ar" class="primary" type="button" disabled>Iniciar experiência AR</button>
-        <button id="demo-mode" class="secondary" type="button">Explorar em modo demonstração</button>
-        <small>Requer Android, Chrome e suporte a WebXR/ARCore.</small>
+      <main id="welcome" class="welcome">
+        <div class="welcome-actions">
+          <button id="enter-ar" class="primary welcome-button" type="button" disabled>Entrar em RA</button>
+          <button id="demo-mode" class="secondary welcome-button" type="button">Visualizar sem RA</button>
+        </div>
       </main>
 
       <section id="hud" class="hud hidden" aria-live="polite">
         <div class="step-card">
-          <div class="step-line"><span id="step-number">POSICIONAMENTO</span><span id="progress-label">0 / 3</span></div>
+          <div class="step-line">
+            <span id="step-number">POSICIONAMENTO</span>
+            <span id="progress-label">0 / 7</span>
+          </div>
           <strong id="instruction">Aponte para uma superfície onde deseja posicionar a atividade.</strong>
           <div id="treatment-counter" class="treatment-counter hidden">
-            <span>Debridamento</span><strong id="counter-value">0.0 / 10 s</strong>
+            <span>Debridamento</span>
+            <strong id="counter-value">0.0 / 10 s</strong>
           </div>
           <div class="progress"><i id="progress-bar"></i></div>
         </div>
+
         <div id="feedback" class="feedback hidden"></div>
+
         <div id="selection-card" class="selection-card hidden">
-          <div><small>OBJETO SELECIONADO</small><strong id="selected-name">—</strong></div>
+          <div>
+            <small>OBJETO SELECIONADO</small>
+            <strong id="selected-name">—</strong>
+          </div>
           <div id="actions" class="actions"></div>
         </div>
+
         <div class="hud-footer">
           <button id="reposition" class="ghost hidden" type="button">Reposicionar</button>
           <button id="finish" class="primary compact hidden" type="button">Finalizar atividade</button>
@@ -49,6 +60,7 @@
         <div class="eyebrow">ATIVIDADE CONCLUÍDA</div>
         <h2>Curativo Multicamada</h2>
         <p>Você completou toda a sequência prática.</p>
+
         <div class="completion-list">
           <span>✓ Debridamento realizado</span>
           <span>✓ Gaze posicionada</span>
@@ -56,14 +68,17 @@
           <span>✓ Faixa 1 — 10 voltas</span>
           <span>✓ Faixa 2 — 10 voltas</span>
         </div>
+
         <div class="metrics">
           <div><strong id="summary-steps">7</strong><span>etapas</span></div>
           <div><strong id="summary-errors">0</strong><span>tentativas inválidas</span></div>
           <div><strong id="summary-time">0:00</strong><span>duração</span></div>
         </div>
+
         <button id="restart" class="primary" type="button">Reiniciar demonstração</button>
       </section>
     </div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

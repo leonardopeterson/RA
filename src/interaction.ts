@@ -772,7 +772,6 @@ export class InteractionController {
   private refreshSelection(id: ObjectId): void {
     const object = this.activity.objects.get(id)!;
     this.ui.showSelection(
-      id,
       object.name,
       object.state,
       this.activity.isHeld(id),

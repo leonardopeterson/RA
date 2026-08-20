@@ -1,9 +1,11 @@
 import {
   AbstractMesh,
+  type AssetContainer,
   Color3,
   Matrix,
   Mesh,
   MeshBuilder,
+  Node,
   PBRMaterial,
   Scene,
   SceneLoader,
@@ -238,17 +240,63 @@ async function attachNormalizedGlb(
   const visualMeshes = result.meshes.filter((mesh) => mesh.getTotalVertices() > 0);
   if (!visualMeshes.length) throw new Error(`${filename} não possui malhas renderizáveis.`);
 
+  const importedNodes: Node[] = [...result.meshes, ...result.transformNodes];
+  const importedSet = new Set(importedNodes);
+  const topLevelNodes = importedNodes.filter((node) => !node.parent || !importedSet.has(node.parent));
+
+  return attachNormalizedNodes(
+    scene,
+    logicalRoot,
+    filename,
+    options,
+    topLevelNodes,
+    visualMeshes,
+  );
+}
+
+function attachNormalizedContainerInstance(
+  scene: Scene,
+  logicalRoot: TransformNode,
+  container: AssetContainer,
+  filename: string,
+  options: AssetVisualOptions,
+): AbstractMesh[] {
+  const instance = container.instantiateModelsToScene(
+    (name) => `${logicalRoot.name}-${name}`,
+    false,
+    { doNotInstantiate: true },
+  );
+  const visualMeshes = Array.from(new Set(instance.rootNodes.flatMap((node) => {
+    const meshes = node instanceof AbstractMesh ? [node] : [];
+    return [...meshes, ...node.getChildMeshes(false)];
+  }))).filter((mesh) => mesh.getTotalVertices() > 0);
+
+  if (!visualMeshes.length) throw new Error(`${filename} não possui malhas renderizáveis.`);
+  return attachNormalizedNodes(
+    scene,
+    logicalRoot,
+    filename,
+    options,
+    instance.rootNodes,
+    visualMeshes,
+  );
+}
+
+function attachNormalizedNodes(
+  scene: Scene,
+  logicalRoot: TransformNode,
+  filename: string,
+  options: AssetVisualOptions,
+  topLevelNodes: Node[],
+  visualMeshes: AbstractMesh[],
+): AbstractMesh[] {
+
   const contentRoot = new TransformNode(`${filename}-visual-root`, scene);
   contentRoot.parent = logicalRoot;
 
-  const importedSet = new Set<AbstractMesh>(result.meshes);
-  const topLevelMeshes = result.meshes.filter((mesh) => {
-    const parent = mesh.parent;
-    return !parent || !(parent instanceof AbstractMesh) || !importedSet.has(parent);
-  });
-  for (const mesh of topLevelMeshes) mesh.parent = contentRoot;
+  for (const node of topLevelNodes) node.parent = contentRoot;
 
-  for (const mesh of result.meshes) mesh.isPickable = options.pickable;
+  for (const mesh of visualMeshes) mesh.isPickable = options.pickable;
 
   const rawBounds = boundsRelativeTo(visualMeshes, contentRoot);
   applyAutomaticOrientation(contentRoot, rawBounds.size, options.orientation);
@@ -524,22 +572,35 @@ export function createWorkspace(scene: Scene): Workspace {
     console.warn('Falha ao carregar tape_roll_medical.glb; usando rolo provisório.', error);
   });
 
-  const loadBandageRoll = (
-    target: TransformNode,
-    fallback: AbstractMesh,
-    label: string,
-  ) => attachNormalizedGlb(scene, target, MODELS.bandageRoll, {
-    orientation: 'roll-side',
-    alignment: 'center',
-    metric: 'max',
-    targetSize: BANDAGE_ROLL_TARGET_SIZE,
-    pickable: true,
-  }).then(() => fallback.setEnabled(false)).catch((error) => {
-    console.warn(`Falha ao carregar ${label}; usando rolo provisório.`, error);
-  });
-
-  void loadBandageRoll(bandage1, bandage1Fallback, 'a_roll_of_gauze.glb (Faixa 1)');
-  void loadBandageRoll(bandage2, bandage2Fallback, 'a_roll_of_gauze.glb (Faixa 2)');
+  void SceneLoader.LoadAssetContainerAsync(MODEL_ROOT, MODELS.bandageRoll, scene)
+    .then((container) => {
+      const options: AssetVisualOptions = {
+        orientation: 'roll-side',
+        alignment: 'center',
+        metric: 'max',
+        targetSize: BANDAGE_ROLL_TARGET_SIZE,
+        pickable: true,
+      };
+      attachNormalizedContainerInstance(
+        scene,
+        bandage1,
+        container,
+        `${MODELS.bandageRoll}-bandage-1`,
+        options,
+      );
+      attachNormalizedContainerInstance(
+        scene,
+        bandage2,
+        container,
+        `${MODELS.bandageRoll}-bandage-2`,
+        options,
+      );
+      bandage1Fallback.setEnabled(false);
+      bandage2Fallback.setEnabled(false);
+    })
+    .catch((error) => {
+      console.warn('Falha ao carregar a_roll_of_gauze.glb; usando rolos provisórios.', error);
+    });
 
   // Âncoras mutáveis: Interaction mantém as mesmas referências e recebe as posições
   // recalculadas quando o GLB anatômico real termina de carregar.
