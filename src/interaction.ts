@@ -18,7 +18,6 @@ import { rotationFromUpToNormal } from './anatomySurface';
 import {
   TREATMENT_MANIPULATION_SURFACE,
   WORKSPACE,
-  type TapeDiagonal,
   type Workspace,
 } from './workspace';
 
@@ -28,7 +27,7 @@ const ELEVATION_START_DISTANCE = 0.08;
 const ELEVATION_END_DISTANCE = 0.015;
 const BANDAGE_ELEVATION_START_DISTANCE = 0.145;
 const BANDAGE_ELEVATION_END_DISTANCE = 0.020;
-const BANDAGE_ROLL_SURFACE_OFFSET = 0.026;
+const MANIPULABLE_ANATOMY_CLEARANCE = 0.002;
 const BANDAGE_SURFACE_MEMORY_MS = 450;
 const BANDAGE_TARGET_BLEND = 0.42;
 const MIN_MOVEMENT_DISTANCE = 0.0015;
@@ -39,8 +38,6 @@ const SURFACE_CONTACT_OFFSETS: Partial<Record<ObjectId, number>> = {
   'debrisoft-pad': 0.006,
   'solution-bottle': 0.018,
   'gauze': 0.0028,
-  // O objeto lógico ainda se chama tape-strip, porém agora representa o rolo.
-  'tape-strip': 0.026,
 };
 
 type BandagePassState =
@@ -68,7 +65,8 @@ export class InteractionController {
   private poseAnimations = new Set<ObjectId>();
 
   private tapeStrokeStart?: Vector3;
-  private tapeCompletedDiagonals: TapeDiagonal[] = [];
+  private tapeCompletedPasses = 0;
+  private tapeFirstDirection?: -1 | 1;
 
   private bandagePassState: BandagePassState = 'WAIT_RIGHT_START';
   private activeBandage?: BandageId;
@@ -122,7 +120,7 @@ export class InteractionController {
     this.ui.update(this.activity.snapshot);
 
     if (this.selected === 'tape-strip') {
-      this.ui.notify('Passe o rolo em diagonal sobre a gaze.', 'info');
+      this.ui.notify('Atravesse a gaze com o rolo e depois faça o caminho de volta.', 'info');
     } else if (this.isBandage(this.selected)) {
       this.ui.notify('Inicie pelo lado direito e contorne o membro.', 'info');
     } else {
@@ -143,17 +141,20 @@ export class InteractionController {
       }
     } else if (id === 'gauze' && this.isOnTreatment(mesh.position)) {
       if (this.activity.applyGauze()) {
-        this.placeAtTreatmentSnap(id);
-        this.ui.notify('Gaze aplicada. Faça duas passadas em X com o esparadrapo.', 'success');
+        this.workspace.setGauzeApplied(true);
+        this.drags.get(id)!.enabled = false;
+        this.currentY.delete(id);
+        this.targetY.delete(id);
+        this.ui.notify('Gaze aplicada. Atravesse e retorne com o esparadrapo.', 'success');
       }
     } else if (id === 'tape-strip') {
       const incomplete = this.activity.objects.get(id)!.state === 'applying'
-        || this.tapeCompletedDiagonals.length > 0;
+        || this.tapeCompletedPasses > 0;
       this.activity.cancelTapeApplication();
       this.workspace.resetTapeStrips();
       this.resetTapeTraversal();
       if (incomplete) {
-        this.ui.notify('Fixação incompleta. As duas passadas precisam formar um X.', 'error');
+        this.ui.notify('Fixação incompleta. Atravesse a gaze e faça a passada de retorno.', 'error');
       }
       void this.returnToInitialPose(id);
     } else if (this.isBandage(id)) {
@@ -252,7 +253,7 @@ export class InteractionController {
       - this.axisValue(center, area.longitudinalAxis);
 
     const insideArea = Math.abs(lateral) <= area.halfLateral
-      && Math.abs(longitudinal) <= area.halfLongitudinal;
+      && Math.abs(longitudinal) <= area.passHalfWidth;
     const safeTapeY = this.surfaceTargetY('tape-strip', position);
 
     if (!insideArea || this.surfaceBlend(position) < 0.82 || position.y < safeTapeY - 0.016) {
@@ -261,15 +262,14 @@ export class InteractionController {
     }
 
     if (!this.tapeStrokeStart) {
-      if (Math.abs(lateral) < area.minStartLateral
-        || Math.abs(longitudinal) < area.minStartLongitudinal) return;
+      if (Math.abs(lateral) < area.minStartLateral) return;
 
       if (this.activity.objects.get('tape-strip')!.state === 'available'
         && !this.activity.beginTapeApplication()) return;
 
       this.tapeStrokeStart = position.clone();
-      if (this.tapeCompletedDiagonals.length === 0) {
-        this.ui.notify('Fixação iniciada. Atravesse a gaze em diagonal.', 'success');
+      if (this.tapeCompletedPasses === 0) {
+        this.ui.notify('Fixação iniciada. Atravesse a gaze.', 'success');
         this.ui.update(this.activity.snapshot);
         this.refreshSelection('tape-strip');
       }
@@ -279,50 +279,45 @@ export class InteractionController {
     const start = this.tapeStrokeStart;
     const startLateral = this.axisValue(start, area.lateralAxis)
       - this.axisValue(center, area.lateralAxis);
-    const startLongitudinal = this.axisValue(start, area.longitudinalAxis)
-      - this.axisValue(center, area.longitudinalAxis);
-
     const deltaLateral = lateral - startLateral;
-    const deltaLongitudinal = longitudinal - startLongitudinal;
     const crossedLateral = startLateral * lateral < 0
       && Math.abs(deltaLateral) >= area.minCrossLateral;
-    const crossedLongitudinal = startLongitudinal * longitudinal < 0
-      && Math.abs(deltaLongitudinal) >= area.minCrossLongitudinal;
+    if (!crossedLateral) return;
 
-    if (!crossedLateral || !crossedLongitudinal) return;
-
-    const diagonal: TapeDiagonal = deltaLateral * deltaLongitudinal >= 0
-      ? 'diagA'
-      : 'diagB';
-    const firstDiagonal = this.tapeCompletedDiagonals[0];
-
-    if (firstDiagonal && firstDiagonal === diagonal) {
+    const direction: -1 | 1 = deltaLateral < 0 ? -1 : 1;
+    if (this.tapeFirstDirection === direction) {
       this.tapeStrokeStart = undefined;
-      this.ui.notify('A segunda passada deve cruzar a primeira para formar um X.', 'info');
+      this.ui.notify('Faça a segunda passada no sentido de retorno.', 'info');
       return;
     }
 
-    this.workspace.tapeAppliedStrips[diagonal].setEnabled(true);
-    this.tapeCompletedDiagonals.push(diagonal);
+    const strip = this.tapeCompletedPasses === 0 ? 'lateral' : 'longitudinal';
+    this.workspace.tapeAppliedStrips[strip].setEnabled(true);
+    this.tapeCompletedPasses += 1;
+
+    if (this.tapeCompletedPasses === 1) {
+      this.tapeFirstDirection = direction;
+      // A posição final da primeira passada já é o início natural do retorno.
+      this.tapeStrokeStart = position.clone();
+      this.ui.notify('Primeira fita aplicada. Agora faça o caminho de volta.', 'success');
+      return;
+    }
+
     this.tapeStrokeStart = undefined;
-
-    if (this.tapeCompletedDiagonals.length === 1) {
-      this.ui.notify('Primeira fita aplicada. Faça a diagonal oposta.', 'success');
-      return;
-    }
 
     if (!this.activity.applyTape()) return;
     this.drags.get('tape-strip')!.enabled = false;
     this.currentY.delete('tape-strip');
     this.targetY.delete('tape-strip');
-    this.ui.notify('Fixação em X concluída.', 'success');
+    this.ui.notify('Fixação em + concluída.', 'success');
     this.ui.update(this.activity.snapshot);
     this.refreshSelection('tape-strip');
 
     // O rolo retorna para a bandeja, enquanto as duas tiras procedurais permanecem.
     void this.returnToInitialPose('tape-strip').then(() => {
       this.tapeStrokeStart = undefined;
-      this.tapeCompletedDiagonals = [];
+      this.tapeCompletedPasses = 0;
+      this.tapeFirstDirection = undefined;
     });
   }
 
@@ -495,6 +490,10 @@ export class InteractionController {
   private async returnToInitialPose(id: ObjectId): Promise<void> {
     const mesh = this.workspace.pickables.get(id)!;
     const pose = OBJECT_INITIAL_POSES[id];
+    const targetPosition = new Vector3(...pose.position);
+    targetPosition.y = this.workspace.supportSurface.getTargetY(mesh, targetPosition, {
+      preferredSupport: 'metal-tray',
+    });
     this.poseAnimations.add(id);
     this.refreshSelection(id);
     this.currentY.delete(id);
@@ -502,13 +501,13 @@ export class InteractionController {
 
     await this.animatePose(
       mesh,
-      new Vector3(...pose.position),
+      targetPosition,
       Quaternion.FromEulerAngles(...pose.rotation),
       520,
     );
 
-    this.currentY.set(id, pose.position[1]);
-    this.targetY.set(id, pose.position[1]);
+    this.currentY.set(id, targetPosition.y);
+    this.targetY.set(id, targetPosition.y);
     this.poseAnimations.delete(id);
     this.refreshSelection(id);
   }
@@ -585,7 +584,8 @@ export class InteractionController {
 
   private resetTapeTraversal(): void {
     this.tapeStrokeStart = undefined;
-    this.tapeCompletedDiagonals = [];
+    this.tapeCompletedPasses = 0;
+    this.tapeFirstDirection = undefined;
   }
 
   private resetBandagePass(): void {
@@ -606,7 +606,10 @@ export class InteractionController {
       position.x,
       position.z,
     );
-    if (sample) return sample.point.y + this.surfaceOffsetFor(id);
+    if (sample) {
+      if (id === 'tape-strip') return this.rootYOnAnatomy(id, sample.point.y);
+      return sample.point.y + this.surfaceOffsetFor(id);
+    }
 
     return TREATMENT_MANIPULATION_SURFACE.height
       + this.activity.objects.get(id)!.treatmentOffset;
@@ -620,7 +623,7 @@ export class InteractionController {
     const now = performance.now();
 
     if (sample) {
-      const y = sample.point.y + BANDAGE_ROLL_SURFACE_OFFSET;
+      const y = this.rootYOnAnatomy(id, sample.point.y, MANIPULABLE_ANATOMY_CLEARANCE);
       this.bandageSurfaceMemory.set(id, { y, at: now });
       return y;
     }
@@ -633,9 +636,20 @@ export class InteractionController {
       + this.activity.objects.get(id)!.treatmentOffset;
   }
 
+  private rootYOnAnatomy(
+    id: ObjectId,
+    surfaceY: number,
+    clearance = MANIPULABLE_ANATOMY_CLEARANCE,
+  ): number {
+    const mesh = this.workspace.pickables.get(id)!;
+    return surfaceY - this.workspace.supportSurface.getBottomOffset(mesh) + clearance;
+  }
+
   private calculateTargetY(id: ObjectId, localPosition: Vector3): number {
-    const object = this.activity.objects.get(id)!;
-    const tableY = WORKSPACE.surfaceY + object.tableOffset;
+    const mesh = this.workspace.pickables.get(id)!;
+    const supportY = this.workspace.supportSurface.getTargetY(mesh, localPosition, {
+      preferredSupport: 'metal-tray',
+    });
 
     if (this.isBandage(id)) {
       let rawTarget: number;
@@ -644,17 +658,17 @@ export class InteractionController {
         && (this.bandagePassState === 'BACK_WAIT_CENTER'
           || this.bandagePassState === 'BACK_WAIT_RIGHT')
       ) {
-        rawTarget = tableY;
+        rawTarget = supportY;
       } else {
         const treatmentY = this.bandageSurfaceTargetY(id, localPosition);
         const blend = this.bandageSurfaceBlend(localPosition);
-        rawTarget = tableY + (treatmentY - tableY) * blend;
+        rawTarget = supportY + (treatmentY - supportY) * blend;
       }
       return this.stabilizeBandageTarget(id, rawTarget);
     }
 
     const treatmentY = this.surfaceTargetY(id, localPosition);
-    return tableY + (treatmentY - tableY) * this.surfaceBlend(localPosition);
+    return supportY + (treatmentY - supportY) * this.surfaceBlend(localPosition);
   }
 
   private stabilizeBandageTarget(id: BandageId, rawTarget: number): number {

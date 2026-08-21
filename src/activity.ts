@@ -10,12 +10,12 @@ export interface InitialPose {
 }
 
 export const OBJECT_INITIAL_POSES: Record<ObjectId, InitialPose> = {
-  'debrisoft-pad': { position: [0.17, 0.047, -0.105], rotation: [0, 0, 0] },
-  'solution-bottle': { position: [0.17, 0.082, 0], rotation: [0, 0, 0] },
-  gauze: { position: [0.17, 0.044, 0.105], rotation: [0, 0, 0] },
-  'tape-strip': { position: [0.17, 0.043, 0.155], rotation: [0, 0, 0] },
-  'bandage-1': { position: [0.245, 0.064, -0.145], rotation: [0, 0, Math.PI / 2] },
-  'bandage-2': { position: [0.245, 0.067, -0.075], rotation: [0, 0, Math.PI / 2] },
+  'debrisoft-pad': { position: [0.06, 0.047, 0.08], rotation: [0, 0, 0] },
+  'solution-bottle': { position: [0.255, 0.082, -0.10], rotation: [0, 0, 0] },
+  gauze: { position: [0.145, 0.044, 0.08], rotation: [0, 0, 0] },
+  'tape-strip': { position: [0.23, 0.043, 0.08], rotation: [0, 0, 0] },
+  'bandage-1': { position: [0.065, 0.064, -0.10], rotation: [0, 0, Math.PI / 2] },
+  'bandage-2': { position: [0.175, 0.067, -0.10], rotation: [0, 0, Math.PI / 2] },
 };
 
 export interface ActivityObjectState extends InitialPose {

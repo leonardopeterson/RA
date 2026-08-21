@@ -43,6 +43,7 @@ ui.bind({
   enterAR: async () => {
     try {
       await workspace.anatomyReady;
+      await workspace.supportReady;
       ui.showExperience(true);
       ui.showPlacement();
       await ar.enter();
@@ -55,6 +56,7 @@ ui.bind({
 
   demo: async () => {
     await workspace.anatomyReady;
+    await workspace.supportReady;
     demoMode = true;
     context.scene.clearColor.set(0, 0, 0, 1);
     ui.showExperience(false);
@@ -90,7 +92,8 @@ ui.bind({
 });
 
 void ar.isSupported().then((supported) => ui.setSupport(supported));
-void workspace.anatomyReady.then(() => ui.setAssetsReady(true));
+void Promise.all([workspace.anatomyReady, workspace.supportReady])
+  .then(() => ui.setAssetsReady(true));
 
 context.scene.onBeforeRenderObservable.add(() => {
   if (!placed) return;

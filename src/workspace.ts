@@ -2,6 +2,7 @@ import {
   AbstractMesh,
   type AssetContainer,
   Color3,
+  DynamicTexture,
   Matrix,
   Mesh,
   MeshBuilder,
@@ -10,6 +11,7 @@ import {
   Scene,
   SceneLoader,
   StandardMaterial,
+  Texture,
   TransformNode,
   Vector3,
   VertexData,
@@ -17,10 +19,11 @@ import {
 import { OBJECT_INITIAL_POSES, type BandageId, type ObjectId } from './activity';
 import {
   AnatomySurface,
-  rotationFromUpToNormal,
   type HorizontalAxis,
   type SurfaceSample,
 } from './anatomySurface';
+import { AppliedSurfaceSystem } from './appliedSurface';
+import { SupportSurfaceSystem } from './supportSurface';
 
 export const WORKSPACE = {
   halfWidth: 0.28,
@@ -47,22 +50,38 @@ const BANDAGE_LAYER_2_CLEARANCE = 0.0080;
 const BANDAGE_DISTAL_START_FRACTION = 0.14;
 
 const TREATMENT_FROM_DISTAL_FRACTION = 0.30;
-const WOUND_SURFACE_OFFSET = 0.0006;
 const WOUND_RADIUS = 0.016;
 const WOUND_HALO_DIAMETER = 0.046;
+const APPLIED_LAYER_CLEARANCE = 0.00030;
+const layerAbove = (
+  previous: { base: number; thickness: number },
+  thickness: number,
+) => ({
+  base: previous.base + previous.thickness + APPLIED_LAYER_CLEARANCE,
+  thickness,
+});
+const WOUND_LAYER = { base: 0.0006, thickness: 0 } as const;
+const GAUZE_LAYER = layerAbove(WOUND_LAYER, 0.0012);
+const TAPE_A_LAYER = layerAbove(GAUZE_LAYER, 0.00065);
+const TAPE_B_LAYER = layerAbove(TAPE_A_LAYER, 0.00065);
+const APPLIED_LAYERS = {
+  wound: WOUND_LAYER,
+  gauze: GAUZE_LAYER,
+  tapeA: TAPE_A_LAYER,
+  tapeB: TAPE_B_LAYER,
+} as const;
 
 const GAUZE_TARGET_SIZE = 0.055;
-const TAPE_ROLL_TARGET_SIZE = 0.048;
-const BANDAGE_ROLL_TARGET_SIZE = 0.054;
+const TAPE_ROLL_TARGET_SIZE = 0.048 * 1.5;
+const BANDAGE_ROLL_TARGET_SIZE = 0.054 * 2;
 const MEDICINE_JAR_TARGET_HEIGHT = 0.105;
-const METAL_TRAY_TARGET_FOOTPRINT = 0.255;
+const METAL_TRAY_TARGET_FOOTPRINT = 0.255 * 1.5;
 
-const TAPE_STRIP_HALF_LATERAL = 0.038;
-const TAPE_STRIP_HALF_LONGITUDINAL = 0.032;
-const TAPE_STRIP_WIDTH = 0.009;
-const TAPE_STRIP_CLEARANCE_A = 0.0042;
-const TAPE_STRIP_CLEARANCE_B = 0.0049;
-const TAPE_STRIP_SAMPLES = 15;
+const TAPE_ROLL_RAW_DIAMETER = 0.15019;
+const TAPE_ROLL_RAW_WIDTH = 0.04542;
+const TAPE_STRIP_LENGTH = 0.070;
+const TAPE_STRIP_WIDTH = TAPE_ROLL_TARGET_SIZE
+  * (TAPE_ROLL_RAW_WIDTH / TAPE_ROLL_RAW_DIAMETER);
 
 // A região lógica continua independente da malha visual. Ela existe para preservar
 // a semântica do gameplay e os pré-requisitos já implementados na Activity.
@@ -74,18 +93,16 @@ export const TREATMENT_MANIPULATION_SURFACE = {
   halfStraightLength: 0.09,
 } as const;
 
-export type TapeDiagonal = 'diagA' | 'diagB';
+export type TapeStripId = 'lateral' | 'longitudinal';
 
 export interface TapeApplicationArea {
   center: Vector3;
   lateralAxis: HorizontalAxis;
   longitudinalAxis: HorizontalAxis;
   halfLateral: number;
-  halfLongitudinal: number;
   minCrossLateral: number;
-  minCrossLongitudinal: number;
+  passHalfWidth: number;
   minStartLateral: number;
-  minStartLongitudinal: number;
 }
 
 export interface BandageZones {
@@ -107,17 +124,20 @@ export interface Workspace {
   root: TransformNode;
   anatomySurface: AnatomySurface;
   anatomyReady: Promise<void>;
+  supportSurface: SupportSurfaceSystem;
+  supportReady: Promise<void>;
   placementIndicator: Mesh;
   pickables: Map<ObjectId, AbstractMesh>;
   treatmentSurface: Mesh;
   treatmentSnap: Vector3;
   solutionZone: Vector3;
   tapeApplicationArea: TapeApplicationArea;
-  tapeAppliedStrips: Record<TapeDiagonal, Mesh>;
+  tapeAppliedStrips: Record<TapeStripId, Mesh>;
   bandageZones: BandageZones;
   bandageRestartPoses: Record<BandageId, Vector3>;
   bandageLayerSegments: Record<BandageId, Mesh[]>;
   resetTapeStrips(): void;
+  setGauzeApplied(applied: boolean): void;
   resetObjects(): void;
 }
 
@@ -151,6 +171,93 @@ function material(
   mat.roughness = roughness;
   mat.metallic = 0;
   return mat;
+}
+
+function gauzeWeaveTexture(scene: Scene): DynamicTexture {
+  const size = 256;
+  const texture = new DynamicTexture(
+    'gauze-applied-weave',
+    { width: size, height: size },
+    scene,
+    true,
+    Texture.TRILINEAR_SAMPLINGMODE,
+  );
+  const context = texture.getContext();
+  context.fillStyle = '#fffdf7';
+  context.fillRect(0, 0, size, size);
+  for (let coordinate = 0; coordinate <= size; coordinate += 8) {
+    const primaryThread = coordinate % 16 === 0;
+    context.strokeStyle = primaryThread ? '#c9c2b2' : '#e2dccf';
+    context.lineWidth = primaryThread ? 2 : 1;
+    context.beginPath();
+    context.moveTo(coordinate, 0);
+    context.lineTo(coordinate, size);
+    context.stroke();
+    context.beginPath();
+    context.moveTo(0, coordinate);
+    context.lineTo(size, coordinate);
+    context.stroke();
+  }
+  texture.wrapU = Texture.WRAP_ADDRESSMODE;
+  texture.wrapV = Texture.WRAP_ADDRESSMODE;
+  texture.uScale = 1.75;
+  texture.vScale = 1.75;
+  texture.gammaSpace = true;
+  texture.anisotropicFilteringLevel = 4;
+  texture.hasAlpha = false;
+  texture.update(false);
+  return texture;
+}
+
+function tapeFiberTexture(scene: Scene): DynamicTexture {
+  const size = 128;
+  const texture = new DynamicTexture(
+    'tape-applied-fibers',
+    { width: size, height: size },
+    scene,
+    true,
+    Texture.TRILINEAR_SAMPLINGMODE,
+  );
+  const context = texture.getContext();
+  context.fillStyle = '#eee7d6';
+  context.fillRect(0, 0, size, size);
+  for (let y = 4; y < size; y += 12) {
+    context.strokeStyle = y % 24 === 4 ? '#d8cdb6' : '#f8f3e8';
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(0, y);
+    context.lineTo(size, y);
+    context.stroke();
+  }
+  texture.wrapU = Texture.WRAP_ADDRESSMODE;
+  texture.wrapV = Texture.WRAP_ADDRESSMODE;
+  texture.uScale = 2;
+  texture.vScale = 1;
+  texture.gammaSpace = true;
+  texture.anisotropicFilteringLevel = 4;
+  texture.hasAlpha = false;
+  texture.update(false);
+  return texture;
+}
+
+function appliedPatchMaterial(
+  scene: Scene,
+  name: string,
+  texture: DynamicTexture,
+  emissiveColor: Color3,
+  specularColor: Color3,
+): StandardMaterial {
+  const result = new StandardMaterial(name, scene);
+  result.diffuseColor = Color3.White();
+  result.diffuseTexture = texture;
+  result.specularColor = specularColor;
+  result.specularPower = 4;
+  result.ambientColor = Color3.White();
+  result.emissiveColor = emissiveColor;
+  result.alpha = 1;
+  result.backFaceCulling = false;
+  result.twoSidedLighting = true;
+  return result;
 }
 
 function setObjectId(root: AbstractMesh, id: ObjectId): void {
@@ -345,6 +452,8 @@ function cloneSection(section: SurfaceSample[]): SurfaceSample[] {
 export function createWorkspace(scene: Scene): Workspace {
   const root = new TransformNode('WorkspaceRoot', scene);
   const anatomySurface = new AnatomySurface(root);
+  const appliedSurface = new AppliedSurfaceSystem(anatomySurface, root);
+  const supportSurface = new SupportSurfaceSystem(root);
 
   const indicator = MeshBuilder.CreateTorus(
     'placement-indicator',
@@ -364,13 +473,15 @@ export function createWorkspace(scene: Scene): Workspace {
   );
   base.parent = root;
   base.position.y = 0.0125;
-  base.material = material(scene, 'base-material', '#dce9e4');
+  base.material = material(scene, 'base-material', '#6c858d');
   base.isPickable = false;
+  supportSurface.registerSupport('station-base', base, [base]);
 
   // A bandeja tem um fallback simples e é substituída pelo GLB assim que o asset carrega.
   const trayRoot = new TransformNode('instrument-tray-root', scene);
   trayRoot.parent = root;
-  trayRoot.position.set(0.16, WORKSPACE.surfaceY + 0.002, 0.0);
+  trayRoot.position.set(0.15, 0, 0.0);
+  trayRoot.rotation.y = Math.PI / 2;
   const trayFallback = MeshBuilder.CreateBox(
     'instrument-tray-fallback',
     { width: 0.22, depth: 0.28, height: 0.010 },
@@ -378,17 +489,26 @@ export function createWorkspace(scene: Scene): Workspace {
   );
   trayFallback.parent = trayRoot;
   trayFallback.position.y = 0.005;
+  trayFallback.scaling.setAll(1.5);
   trayFallback.material = material(scene, 'tray-fallback-material', '#829b94', 0.35);
   trayFallback.isPickable = false;
 
-  void attachNormalizedGlb(scene, trayRoot, MODELS.metalTray, {
+  const trayReady = attachNormalizedGlb(scene, trayRoot, MODELS.metalTray, {
     orientation: 'flat',
     alignment: 'base',
     metric: 'footprint',
     targetSize: METAL_TRAY_TARGET_FOOTPRINT,
     pickable: false,
-  }).then(() => trayFallback.setEnabled(false)).catch((error) => {
+  }).then((meshes) => {
+    trayFallback.setEnabled(false);
+    return meshes;
+  }).catch((error) => {
     console.warn('Falha ao carregar metal_tray.glb; usando bandeja provisória.', error);
+    return [trayFallback];
+  }).then((meshes) => {
+    supportSurface.invalidateObjectBounds(trayRoot);
+    supportSurface.placeOnSupport(trayRoot, 'station-base');
+    supportSurface.registerSupport('metal-tray', trayRoot, meshes);
   });
 
   // Anatomia provisória: somente perna/tornozelo, sem o antigo pé em caixa.
@@ -418,30 +538,18 @@ export function createWorkspace(scene: Scene): Workspace {
   lowerLeg.setEnabled(false);
   ankle.setEnabled(false);
 
-  const treatmentVisualAnchor = new TransformNode('treatment-visual-anchor', scene);
-  treatmentVisualAnchor.parent = root;
-
-  const treatment = MeshBuilder.CreateDisc(
-    'TreatmentInteractionSurface',
-    { radius: WOUND_RADIUS, tessellation: 48 },
-    scene,
-  );
-  treatment.parent = treatmentVisualAnchor;
-  treatment.rotation.x = Math.PI / 2;
-  treatment.material = material(scene, 'treatment-material', '#9f414b', 0.86);
+  const treatment = new Mesh('TreatmentInteractionSurface', scene);
+  treatment.parent = root;
+  const treatmentMaterial = material(scene, 'treatment-material', '#7f2028', 0.88);
+  treatmentMaterial.backFaceCulling = false;
+  treatment.material = treatmentMaterial;
   treatment.isPickable = false;
 
-  const halo = MeshBuilder.CreateTorus(
-    'treatment-halo',
-    { diameter: WOUND_HALO_DIAMETER, thickness: 0.0022, tessellation: 48 },
-    scene,
-  );
-  halo.parent = treatmentVisualAnchor;
-  halo.rotation.x = Math.PI / 2;
-  halo.position.y = 0.0008;
-  const haloMat = new StandardMaterial('halo-material', scene);
-  haloMat.emissiveColor = new Color3(0.25, 1, 0.68);
-  haloMat.alpha = 0.24;
+  const halo = new Mesh('treatment-halo', scene);
+  halo.parent = root;
+  const haloMat = material(scene, 'halo-material', '#641a22', 0.90);
+  haloMat.alpha = 0.20;
+  haloMat.backFaceCulling = false;
   halo.material = haloMat;
   halo.isPickable = false;
 
@@ -503,6 +611,7 @@ export function createWorkspace(scene: Scene): Workspace {
   );
   tapeFallback.parent = tapeRoll;
   tapeFallback.rotation.z = Math.PI / 2;
+  tapeFallback.scaling.setAll(1.5);
   tapeFallback.material = material(scene, 'tape-roll-fallback-material', '#f4f3ee', 0.90);
   tapeFallback.isPickable = true;
 
@@ -516,6 +625,7 @@ export function createWorkspace(scene: Scene): Workspace {
   );
   bandage1Fallback.parent = bandage1;
   bandage1Fallback.rotation.z = Math.PI / 2;
+  bandage1Fallback.scaling.setAll(2);
   bandage1Fallback.material = material(scene, 'bandage-roll-fallback-material', '#f0e6cf', 0.9);
   bandage1Fallback.isPickable = true;
 
@@ -529,7 +639,8 @@ export function createWorkspace(scene: Scene): Workspace {
   );
   bandage2Fallback.parent = bandage2;
   bandage2Fallback.rotation.z = Math.PI / 2;
-  bandage2Fallback.material = material(scene, 'bandage-roll-2-fallback-material', '#d9e7e5', 0.9);
+  bandage2Fallback.scaling.setAll(2);
+  bandage2Fallback.material = material(scene, 'bandage-roll-2-fallback-material', '#b89a72', 0.9);
   bandage2Fallback.isPickable = true;
 
   const pickables = new Map<ObjectId, AbstractMesh>([
@@ -541,7 +652,22 @@ export function createWorkspace(scene: Scene): Workspace {
     ['bandage-2', bandage2],
   ]);
 
-  void attachNormalizedGlb(scene, bottle, MODELS.medicineJar, {
+  const tapeMaterial = appliedPatchMaterial(
+    scene,
+    'applied-tape-material',
+    tapeFiberTexture(scene),
+    Color3.FromHexString('#181713'),
+    Color3.FromHexString('#17150f'),
+  );
+  const gauzeAppliedMaterial = appliedPatchMaterial(
+    scene,
+    'gauze-applied-material',
+    gauzeWeaveTexture(scene),
+    Color3.FromHexString('#20201d'),
+    Color3.FromHexString('#0d0d0b'),
+  );
+
+  const bottleReady = attachNormalizedGlb(scene, bottle, MODELS.medicineJar, {
     orientation: 'upright',
     alignment: 'base',
     metric: 'height',
@@ -554,27 +680,31 @@ export function createWorkspace(scene: Scene): Workspace {
     console.warn('Falha ao carregar old_medicine_jar.glb; usando frasco provisório.', error);
   });
 
-  void attachNormalizedGlb(scene, gauze, MODELS.gauze, {
+  const gauzeReady = attachNormalizedGlb(scene, gauze, MODELS.gauze, {
     orientation: 'flat',
     alignment: 'center',
     metric: 'footprint',
     targetSize: GAUZE_TARGET_SIZE,
     pickable: true,
-  }).then(() => gauzeFallback.setEnabled(false)).catch((error) => {
+  }).then(() => {
+    gauzeFallback.setEnabled(false);
+  }).catch((error) => {
     console.warn('Falha ao carregar gauze_10x10cm.glb; usando gaze provisória.', error);
   });
 
-  void attachNormalizedGlb(scene, tapeRoll, MODELS.tapeRoll, {
+  const tapeReady = attachNormalizedGlb(scene, tapeRoll, MODELS.tapeRoll, {
     orientation: 'roll-side',
     alignment: 'center',
     metric: 'max',
     targetSize: TAPE_ROLL_TARGET_SIZE,
     pickable: true,
-  }).then(() => tapeFallback.setEnabled(false)).catch((error) => {
+  }).then(() => {
+    tapeFallback.setEnabled(false);
+  }).catch((error) => {
     console.warn('Falha ao carregar tape_roll_medical.glb; usando rolo provisório.', error);
   });
 
-  void SceneLoader.LoadAssetContainerAsync(MODEL_ROOT, MODELS.bandageRoll, scene)
+  const bandageRollsReady = SceneLoader.LoadAssetContainerAsync(MODEL_ROOT, MODELS.bandageRoll, scene)
     .then((container) => {
       const options: AssetVisualOptions = {
         orientation: 'roll-side',
@@ -590,13 +720,19 @@ export function createWorkspace(scene: Scene): Workspace {
         `${MODELS.bandageRoll}-bandage-1`,
         options,
       );
-      attachNormalizedContainerInstance(
+      const bandage2Meshes = attachNormalizedContainerInstance(
         scene,
         bandage2,
         container,
         `${MODELS.bandageRoll}-bandage-2`,
         options,
       );
+      for (const mesh of bandage2Meshes) {
+        if (!(mesh.material instanceof PBRMaterial)) continue;
+        const tintedMaterial = mesh.material.clone(`${mesh.material.name}-bandage-2`);
+        tintedMaterial.albedoColor = Color3.FromHexString('#b89a72');
+        mesh.material = tintedMaterial;
+      }
       bandage1Fallback.setEnabled(false);
       bandage2Fallback.setEnabled(false);
     })
@@ -614,11 +750,9 @@ export function createWorkspace(scene: Scene): Workspace {
     lateralAxis: 'x',
     longitudinalAxis: 'z',
     halfLateral: 0.060,
-    halfLongitudinal: 0.052,
     minCrossLateral: 0.045,
-    minCrossLongitudinal: 0.026,
+    passHalfWidth: 0.026,
     minStartLateral: 0.018,
-    minStartLongitudinal: 0.012,
   };
 
   const bandageZones: BandageZones = {
@@ -641,87 +775,26 @@ export function createWorkspace(scene: Scene): Workspace {
     'bandage-2': bandageZones.right.add(new Vector3(0, 0.043, 0)),
   };
 
-  const tapeMaterial = material(scene, 'applied-tape-material', '#f7f7f2', 0.92);
-  let tapeAppliedStrips: Record<TapeDiagonal, Mesh> = {
-    diagA: new Mesh('tape-applied-diag-a-placeholder', scene),
-    diagB: new Mesh('tape-applied-diag-b-placeholder', scene),
+  const tapeAppliedStrips: Record<TapeStripId, Mesh> = {
+    lateral: new Mesh('tape-applied-lateral', scene),
+    longitudinal: new Mesh('tape-applied-longitudinal', scene),
   };
-  tapeAppliedStrips.diagA.parent = root;
-  tapeAppliedStrips.diagB.parent = root;
-  tapeAppliedStrips.diagA.setEnabled(false);
-  tapeAppliedStrips.diagB.setEnabled(false);
+  for (const strip of Object.values(tapeAppliedStrips)) {
+    strip.parent = root;
+    strip.material = tapeMaterial;
+    strip.setEnabled(false);
+  }
+
+  const gauzeApplied = new Mesh('gauze-applied-surface', scene);
+  gauzeApplied.parent = root;
+  gauzeApplied.material = gauzeAppliedMaterial;
+  gauzeApplied.isPickable = false;
+  gauzeApplied.setEnabled(false);
 
   const bandageLayerSegments: Record<BandageId, Mesh[]> = {
     'bandage-1': [],
     'bandage-2': [],
   };
-
-  function createConformingTapeStrip(
-    name: string,
-    diagonal: TapeDiagonal,
-    clearance: number,
-  ): Mesh {
-    const frame = anatomySurface.frame;
-    if (!frame) return new Mesh(name, scene);
-
-    const center = treatmentSnap.clone();
-    const lateralBasis = anatomySurface.lateralBasis();
-    const longitudinalBasis = anatomySurface.longitudinalBasis();
-    const sign = diagonal === 'diagA' ? 1 : -1;
-
-    const halfLateral = Math.min(TAPE_STRIP_HALF_LATERAL, frame.width * 0.40);
-    const halfLongitudinal = Math.min(TAPE_STRIP_HALF_LONGITUDINAL, frame.length * 0.10);
-    const tangent = lateralBasis.scale(halfLateral)
-      .add(longitudinalBasis.scale(sign * halfLongitudinal))
-      .normalize();
-    const horizontalPerpendicular = Vector3.Cross(Vector3.Up(), tangent).normalize();
-
-    const positions: number[] = [];
-    const indices: number[] = [];
-    const normals: number[] = [];
-    const uvs: number[] = [];
-
-    for (let i = 0; i < TAPE_STRIP_SAMPLES; i++) {
-      const t = i / (TAPE_STRIP_SAMPLES - 1);
-      const signed = t * 2 - 1;
-      const horizontalCenter = center
-        .add(lateralBasis.scale(signed * halfLateral))
-        .add(longitudinalBasis.scale(signed * sign * halfLongitudinal));
-
-      const leftProbe = horizontalCenter.add(horizontalPerpendicular.scale(TAPE_STRIP_WIDTH / 2));
-      const rightProbe = horizontalCenter.add(horizontalPerpendicular.scale(-TAPE_STRIP_WIDTH / 2));
-      const centerSample = anatomySurface.sampleTopSurfaceClamped(horizontalCenter.x, horizontalCenter.z);
-      const leftSample = anatomySurface.sampleTopSurfaceClamped(leftProbe.x, leftProbe.z) ?? centerSample;
-      const rightSample = anatomySurface.sampleTopSurfaceClamped(rightProbe.x, rightProbe.z) ?? centerSample;
-      if (!leftSample || !rightSample) continue;
-
-      const left = leftSample.point.add(leftSample.normal.scale(clearance));
-      const right = rightSample.point.add(rightSample.normal.scale(clearance));
-      positions.push(left.x, left.y, left.z, right.x, right.y, right.z);
-      uvs.push(0, t, 1, t);
-    }
-
-    const rowCount = positions.length / 6;
-    if (rowCount < 2) return new Mesh(name, scene);
-
-    for (let i = 0; i < rowCount - 1; i++) {
-      const a = i * 2;
-      const b = a + 2;
-      indices.push(a, b, a + 1, a + 1, b, b + 1);
-    }
-
-    VertexData.ComputeNormals(positions, indices, normals);
-    const mesh = new Mesh(name, scene);
-    const vertexData = new VertexData();
-    vertexData.positions = positions;
-    vertexData.indices = indices;
-    vertexData.normals = normals;
-    vertexData.uvs = uvs;
-    vertexData.applyToMesh(mesh);
-    mesh.material = tapeMaterial;
-    mesh.isPickable = false;
-    return mesh;
-  }
 
   function createConformingBandSegment(
     name: string,
@@ -828,27 +901,44 @@ export function createWorkspace(scene: Scene): Workspace {
   };
 
   const rebuildTapeStrips = () => {
-    const previousA = tapeAppliedStrips.diagA.isEnabled();
-    const previousB = tapeAppliedStrips.diagB.isEnabled();
-    tapeAppliedStrips.diagA.dispose();
-    tapeAppliedStrips.diagB.dispose();
-
-    tapeAppliedStrips = {
-      diagA: createConformingTapeStrip(
-        'tape-applied-diag-a',
-        'diagA',
-        TAPE_STRIP_CLEARANCE_A,
-      ),
-      diagB: createConformingTapeStrip(
-        'tape-applied-diag-b',
-        'diagB',
-        TAPE_STRIP_CLEARANCE_B,
-      ),
-    };
-    tapeAppliedStrips.diagA.parent = root;
-    tapeAppliedStrips.diagB.parent = root;
-    tapeAppliedStrips.diagA.setEnabled(previousA);
-    tapeAppliedStrips.diagB.setEnabled(previousB);
+    const lateralBasis = anatomySurface.lateralBasis();
+    const longitudinalBasis = anatomySurface.longitudinalBasis();
+    appliedSurface.conform(tapeAppliedStrips.lateral, {
+      center: treatmentSnap,
+      axisU: lateralBasis,
+      axisV: longitudinalBasis,
+      width: TAPE_STRIP_LENGTH,
+      height: TAPE_STRIP_WIDTH,
+      layerOffset: APPLIED_LAYERS.tapeA.base,
+      thickness: APPLIED_LAYERS.tapeA.thickness,
+      subdivisionsU: 14,
+      subdivisionsV: 2,
+      conformMode: 'smoothed',
+      smoothingIterations: 6,
+      smoothingStrength: 0.72,
+      surfaceInfluence: 0.03,
+      maxGlobalLift: 0.0008,
+      penetrationSpread: 0.75,
+      penetrationSpreadIterations: 4,
+    });
+    appliedSurface.conform(tapeAppliedStrips.longitudinal, {
+      center: treatmentSnap,
+      axisU: longitudinalBasis,
+      axisV: lateralBasis,
+      width: TAPE_STRIP_LENGTH,
+      height: TAPE_STRIP_WIDTH,
+      layerOffset: APPLIED_LAYERS.tapeB.base,
+      thickness: APPLIED_LAYERS.tapeB.thickness,
+      subdivisionsU: 14,
+      subdivisionsV: 2,
+      conformMode: 'smoothed',
+      smoothingIterations: 6,
+      smoothingStrength: 0.72,
+      surfaceInfluence: 0.03,
+      maxGlobalLift: 0.0008,
+      penetrationSpread: 0.75,
+      penetrationSpreadIterations: 4,
+    });
   };
 
   const rebuildBandageLayers = () => {
@@ -863,7 +953,7 @@ export function createWorkspace(scene: Scene): Workspace {
     }
 
     bandageLayerSegments['bandage-1'] = createBandageLayer(1, '#eee3cb');
-    bandageLayerSegments['bandage-2'] = createBandageLayer(2, '#d8e8e5');
+    bandageLayerSegments['bandage-2'] = createBandageLayer(2, '#b89a72');
 
     for (const id of ['bandage-1', 'bandage-2'] as const) {
       bandageLayerSegments[id].forEach((mesh, index) => {
@@ -884,18 +974,56 @@ export function createWorkspace(scene: Scene): Workspace {
 
     treatmentSnap.copyFrom(treatmentSample.point);
     solutionZone.copyFrom(treatmentSample.point.add(new Vector3(0, 0.065, 0)));
-    treatmentVisualAnchor.position.copyFrom(
-      treatmentSample.point.add(treatmentSample.normal.scale(WOUND_SURFACE_OFFSET)),
-    );
-    treatmentVisualAnchor.rotationQuaternion = rotationFromUpToNormal(treatmentSample.normal);
+
+    const lateralBasis = anatomySurface.lateralBasis();
+    const longitudinalBasis = anatomySurface.longitudinalBasis();
+    appliedSurface.conform(halo, {
+      center: treatmentSnap,
+      axisU: lateralBasis,
+      axisV: longitudinalBasis,
+      width: WOUND_HALO_DIAMETER,
+      height: WOUND_HALO_DIAMETER * 0.82,
+      layerOffset: APPLIED_LAYERS.wound.base * 0.75,
+      shape: 'ellipse',
+      subdivisionsU: 32,
+      subdivisionsV: 4,
+    });
+    appliedSurface.conform(treatment, {
+      center: treatmentSnap,
+      axisU: lateralBasis,
+      axisV: longitudinalBasis,
+      width: WOUND_RADIUS * 2,
+      height: WOUND_RADIUS * 1.65,
+      layerOffset: APPLIED_LAYERS.wound.base,
+      shape: 'ellipse',
+      subdivisionsU: 32,
+      subdivisionsV: 5,
+    });
+    appliedSurface.conform(gauzeApplied, {
+      center: treatmentSnap,
+      axisU: lateralBasis,
+      axisV: longitudinalBasis,
+      width: GAUZE_TARGET_SIZE,
+      height: GAUZE_TARGET_SIZE * 0.90,
+      layerOffset: APPLIED_LAYERS.gauze.base,
+      thickness: APPLIED_LAYERS.gauze.thickness,
+      subdivisionsU: 8,
+      subdivisionsV: 8,
+      conformMode: 'smoothed',
+      smoothingIterations: 4,
+      smoothingStrength: 0.62,
+      surfaceInfluence: 0.12,
+      maxGlobalLift: 0.0012,
+      penetrationSpread: 0.55,
+      penetrationSpreadIterations: 2,
+    });
 
     tapeApplicationArea.center.copyFrom(treatmentSample.point);
     tapeApplicationArea.lateralAxis = frame.lateralAxis;
     tapeApplicationArea.longitudinalAxis = frame.longitudinalAxis;
     tapeApplicationArea.halfLateral = Math.max(0.050, Math.min(0.070, frame.width * 0.68));
-    tapeApplicationArea.halfLongitudinal = Math.max(0.043, Math.min(0.060, frame.length * 0.16));
     tapeApplicationArea.minCrossLateral = tapeApplicationArea.halfLateral * 0.75;
-    tapeApplicationArea.minCrossLongitudinal = tapeApplicationArea.halfLongitudinal * 0.55;
+    tapeApplicationArea.passHalfWidth = Math.max(0.024, Math.min(0.033, frame.length * 0.088));
 
     const bandageStep = BANDAGE_WIDTH * (1 - BANDAGE_OVERLAP_RATIO);
     const bandageStartDistance = Math.max(
@@ -956,8 +1084,21 @@ export function createWorkspace(scene: Scene): Workspace {
   };
 
   const resetTapeStrips = () => {
-    tapeAppliedStrips.diagA.setEnabled(false);
-    tapeAppliedStrips.diagB.setEnabled(false);
+    tapeAppliedStrips.lateral.setEnabled(false);
+    tapeAppliedStrips.longitudinal.setEnabled(false);
+  };
+
+  const setGauzeApplied = (applied: boolean) => {
+    gauzeApplied.setEnabled(applied);
+    gauze.setEnabled(!applied);
+  };
+
+  let supportsCalibrated = false;
+  const placeStoredProps = () => {
+    for (const mesh of pickables.values()) {
+      supportSurface.invalidateObjectBounds(mesh);
+      supportSurface.placeOnSupport(mesh, 'metal-tray');
+    }
   };
 
   const resetObjects = () => {
@@ -969,8 +1110,21 @@ export function createWorkspace(scene: Scene): Workspace {
       mesh.visibility = 1;
       mesh.setEnabled(true);
     }
+    if (supportsCalibrated) placeStoredProps();
+    setGauzeApplied(false);
     resetTapeStrips();
   };
+
+  const supportReady = Promise.all([
+    trayReady,
+    bottleReady,
+    gauzeReady,
+    tapeReady,
+    bandageRollsReady,
+  ]).then(() => {
+    supportsCalibrated = true;
+    placeStoredProps();
+  });
 
   let legVisualRoot: TransformNode | undefined;
   const anatomyReady = SceneLoader.ImportMeshAsync('', MODEL_ROOT, MODELS.anatomy, scene)
@@ -1053,19 +1207,20 @@ export function createWorkspace(scene: Scene): Workspace {
     root,
     anatomySurface,
     anatomyReady,
+    supportSurface,
+    supportReady,
     placementIndicator: indicator,
     pickables,
     treatmentSurface: treatment,
     treatmentSnap,
     solutionZone,
     tapeApplicationArea,
-    get tapeAppliedStrips() {
-      return tapeAppliedStrips;
-    },
+    tapeAppliedStrips,
     bandageZones,
     bandageRestartPoses,
     bandageLayerSegments,
     resetTapeStrips,
+    setGauzeApplied,
     resetObjects,
   };
 }
