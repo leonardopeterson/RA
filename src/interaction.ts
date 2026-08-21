@@ -15,7 +15,7 @@ import {
 } from '@babylonjs/core';
 import { Activity, OBJECT_INITIAL_POSES, type BandageId, type ObjectId } from './activity';
 import type { UI } from './ui';
-import { rotationFromUpToNormal } from './anatomySurface';
+import { rotationFromUpToNormal, type SurfaceSample } from './anatomySurface';
 import {
   TREATMENT_MANIPULATION_SURFACE,
   WORKSPACE,
@@ -37,6 +37,8 @@ const MAX_MOVEMENT_SAMPLE_SECONDS = 0.1;
 const TREATMENT_CONTACT_RADIUS = 0.050;
 const INVENTORY_LATERAL_REACH = 0.15;
 const INVENTORY_LONGITUDINAL_REACH = 0.17;
+const DRAG_SURFACE_MEMORY_MS = 120;
+const PICKING_IDENTITY_MATRIX = Matrix.Identity();
 
 const SURFACE_CONTACT_OFFSETS: Partial<Record<ObjectId, number>> = {
   'debrisoft-pad': 0.006,
@@ -57,6 +59,19 @@ interface BandageSurfaceMemory {
   at: number;
 }
 
+interface SurfaceMoveContext {
+  x: number;
+  z: number;
+  anatomySample: SurfaceSample | null;
+}
+
+interface DragSurfaceMemory {
+  x: number;
+  z: number;
+  sample: SurfaceSample;
+  at: number;
+}
+
 export class InteractionController {
   private selected?: ObjectId;
   private highlight: HighlightLayer;
@@ -70,6 +85,8 @@ export class InteractionController {
   private solutionAnimationGeneration = 0;
   private poseAnimations = new Set<ObjectId>();
   private inventoryDragging?: ObjectId;
+  private moveContexts = new Map<ObjectId, SurfaceMoveContext>();
+  private dragSurfaceMemory = new Map<ObjectId, DragSurfaceMemory>();
 
   private tapeStrokeStart?: Vector3;
   private tapeCompletedPasses = 0;
@@ -145,7 +162,8 @@ export class InteractionController {
     mesh.position.z = pointerPosition.z;
     mesh.rotationQuaternion = null;
     mesh.rotation.set(...OBJECT_INITIAL_POSES[id].rotation);
-    this.currentY.set(id, this.calculateTargetY(id, mesh.position));
+    const moveContext = this.createMoveContext(id, mesh.position);
+    this.currentY.set(id, this.calculateTargetY(id, mesh.position, moveContext));
     this.targetY.set(id, this.currentY.get(id)!);
     mesh.position.y = this.currentY.get(id)!;
 
@@ -206,6 +224,7 @@ export class InteractionController {
     this.drags.get(id)!.enabled = false;
     this.currentY.delete(id);
     this.targetY.delete(id);
+    this.clearMoveContext(id);
     this.workspace.setInventoryPropActive(id, false);
     this.clearSelectionState();
     this.ui.update(this.activity.snapshot);
@@ -257,7 +276,7 @@ export class InteractionController {
       void this.returnBandageToSide(id, startSide);
     } else {
       this.activity.release(id);
-      this.targetY.set(id, this.calculateTargetY(id, mesh.position));
+      this.targetY.set(id, this.calculateTargetY(id, mesh.position, this.moveContextFor(id, mesh.position)));
       if (id === 'solution-bottle') void this.returnToInitialPose(id);
       else if (this.workspace.gameMode === 'inventory') {
         this.currentY.delete(id);
@@ -281,7 +300,8 @@ export class InteractionController {
 
     drag.onDragStartObservable.add((event) => {
       this.currentY.set(id, mesh.position.y);
-      this.targetY.set(id, this.calculateTargetY(id, mesh.position));
+      const moveContext = this.createMoveContext(id, mesh.position);
+      this.targetY.set(id, this.calculateTargetY(id, mesh.position, moveContext));
       const pointerPosition = this.toWorkspaceLocal(event.dragPlanePoint);
       this.dragOffset.set(
         id,
@@ -328,15 +348,18 @@ export class InteractionController {
     mesh.position.x = Math.max(minX, Math.min(maxX, mesh.position.x));
     mesh.position.z = Math.max(minZ, Math.min(maxZ, mesh.position.z));
 
-    this.targetY.set(id, this.calculateTargetY(id, mesh.position));
+    const moveContext = this.createMoveContext(id, mesh.position);
+    this.targetY.set(id, this.calculateTargetY(id, mesh.position, moveContext));
     mesh.position.y = this.currentY.get(id) ?? mesh.position.y;
 
-    if (id === 'solution-bottle' && this.activity.step === 1 && this.isNearSolutionZone(mesh.position)) {
+    if (id === 'solution-bottle'
+      && this.activity.step === 1
+      && this.isNearSolutionZone(mesh.position, moveContext)) {
       void this.animateSolutionApplication();
     } else if (id === 'debrisoft-pad' && this.activity.step === 2) {
       this.updateDebridement(mesh.position);
     } else if (id === 'tape-strip' && this.activity.step === 4) {
-      this.updateTapeApplication(mesh.position);
+      this.updateTapeApplication(mesh.position, moveContext);
     } else if (
       this.isBandage(id)
       && ((id === 'bandage-1' && this.activity.step === 5)
@@ -346,7 +369,7 @@ export class InteractionController {
     }
   }
 
-  private updateTapeApplication(position: Vector3): void {
+  private updateTapeApplication(position: Vector3, moveContext: SurfaceMoveContext): void {
     const area = this.workspace.tapeApplicationArea;
     const center = area.center;
     const lateral = this.axisValue(position, area.lateralAxis)
@@ -356,7 +379,7 @@ export class InteractionController {
 
     const insideArea = Math.abs(lateral) <= area.halfLateral
       && Math.abs(longitudinal) <= area.passHalfWidth;
-    const safeTapeY = this.surfaceTargetY('tape-strip', position);
+    const safeTapeY = this.surfaceTargetY('tape-strip', position, moveContext.anatomySample);
 
     if (!insideArea || this.surfaceBlend(position) < 0.82 || position.y < safeTapeY - 0.016) {
       if (!insideArea) this.tapeStrokeStart = undefined;
@@ -402,6 +425,7 @@ export class InteractionController {
     this.drags.get('tape-strip')!.enabled = false;
     this.currentY.delete('tape-strip');
     this.targetY.delete('tape-strip');
+    this.clearMoveContext('tape-strip');
     this.ui.notify('Fixação em + concluída.', 'success');
     this.ui.update(this.activity.snapshot);
     this.refreshSelection('tape-strip');
@@ -506,6 +530,7 @@ export class InteractionController {
       this.drags.get(id)!.enabled = false;
       this.currentY.delete(id);
       this.targetY.delete(id);
+      this.clearMoveContext(id);
       this.bandageSurfaceMemory.delete(id);
       this.bandageTargetMemory.delete(id);
       bandage.setEnabled(false);
@@ -573,6 +598,7 @@ export class InteractionController {
     this.refreshSelection(id);
     this.currentY.delete(id);
     this.targetY.delete(id);
+    this.clearMoveContext(id);
 
     const pourPivot = this.workspace.solutionPourPivot;
     const initialRotation = Quaternion.Identity();
@@ -599,6 +625,7 @@ export class InteractionController {
     if (this.workspace.gameMode === 'inventory') {
       this.currentY.delete(id);
       this.targetY.delete(id);
+      this.clearMoveContext(id);
       this.workspace.setInventoryPropActive(id, false);
       this.refreshSelection(id);
       return;
@@ -612,6 +639,7 @@ export class InteractionController {
     this.refreshSelection(id);
     this.currentY.delete(id);
     this.targetY.delete(id);
+    this.clearMoveContext(id);
 
     await this.animatePose(
       mesh,
@@ -729,13 +757,13 @@ export class InteractionController {
       ?? this.activity.objects.get(id)!.treatmentOffset;
   }
 
-  private surfaceTargetY(id: ObjectId, position: Vector3): number {
-    if (this.isBandage(id)) return this.bandageSurfaceTargetY(id, position);
+  private surfaceTargetY(
+    id: ObjectId,
+    position: Vector3,
+    sample: SurfaceSample | null,
+  ): number {
+    if (this.isBandage(id)) return this.bandageSurfaceTargetY(id, position, sample);
 
-    const sample = this.workspace.anatomySurface.sampleTopSurfaceClamped(
-      position.x,
-      position.z,
-    );
     if (sample) {
       if (id === 'tape-strip') return this.rootYOnAnatomy(id, sample.point.y);
       return sample.point.y + this.surfaceOffsetFor(id);
@@ -745,11 +773,11 @@ export class InteractionController {
       + this.activity.objects.get(id)!.treatmentOffset;
   }
 
-  private bandageSurfaceTargetY(id: BandageId, position: Vector3): number {
-    const sample = this.workspace.anatomySurface.sampleTopSurfaceClamped(
-      position.x,
-      position.z,
-    );
+  private bandageSurfaceTargetY(
+    id: BandageId,
+    position: Vector3,
+    sample: SurfaceSample | null,
+  ): number {
     const now = performance.now();
 
     if (sample) {
@@ -775,7 +803,11 @@ export class InteractionController {
     return surfaceY - this.workspace.supportSurface.getBottomOffset(mesh) + clearance;
   }
 
-  private calculateTargetY(id: ObjectId, localPosition: Vector3): number {
+  private calculateTargetY(
+    id: ObjectId,
+    localPosition: Vector3,
+    moveContext = this.moveContextFor(id, localPosition),
+  ): number {
     const mesh = this.workspace.pickables.get(id)!;
     const supportY = this.workspace.gameMode === 'inventory'
       ? this.workspace.treatmentSnap.y + this.activity.objects.get(id)!.treatmentOffset
@@ -794,14 +826,14 @@ export class InteractionController {
           ? this.workspace.treatmentSnap.y - 0.09
           : supportY;
       } else {
-        const treatmentY = this.bandageSurfaceTargetY(id, localPosition);
+        const treatmentY = this.bandageSurfaceTargetY(id, localPosition, moveContext.anatomySample);
         const blend = this.bandageSurfaceBlend(localPosition);
         rawTarget = supportY + (treatmentY - supportY) * blend;
       }
       return this.stabilizeBandageTarget(id, rawTarget);
     }
 
-    const treatmentY = this.surfaceTargetY(id, localPosition);
+    const treatmentY = this.surfaceTargetY(id, localPosition, moveContext.anatomySample);
     return supportY + (treatmentY - supportY) * this.surfaceBlend(localPosition);
   }
 
@@ -857,8 +889,12 @@ export class InteractionController {
       ) <= TREATMENT_CONTACT_RADIUS;
   }
 
-  private isNearSolutionZone(position: Vector3): boolean {
-    const safeBottleY = this.surfaceTargetY('solution-bottle', position);
+  private isNearSolutionZone(position: Vector3, moveContext: SurfaceMoveContext): boolean {
+    const safeBottleY = this.surfaceTargetY(
+      'solution-bottle',
+      position,
+      moveContext.anatomySample,
+    );
     return this.surfaceBlend(position) >= 0.94
       && position.y >= safeBottleY - 0.010
       && Math.hypot(
@@ -870,10 +906,13 @@ export class InteractionController {
   private updateAutomaticHeights(): void {
     for (const id of this.targetY.keys()) this.updateObjectHeight(id);
     const bottle = this.workspace.pickables.get('solution-bottle')!;
+    const moveContext = this.moveContexts.get('solution-bottle');
     if (
       this.activity.isHeld('solution-bottle')
       && this.activity.step === 1
-      && this.isNearSolutionZone(bottle.position)
+      && moveContext
+      && this.contextMatches(moveContext, bottle.position)
+      && this.isNearSolutionZone(bottle.position, moveContext)
     ) {
       void this.animateSolutionApplication();
     }
@@ -886,14 +925,68 @@ export class InteractionController {
       : HEIGHT_SMOOTHING_SPEED;
     const smoothing = 1 - Math.exp(-speed * deltaSeconds);
     const mesh = this.workspace.pickables.get(id)!;
-    const targetY = this.targetY.get(id) ?? this.calculateTargetY(id, mesh.position);
+    const targetY = this.targetY.get(id)
+      ?? this.calculateTargetY(id, mesh.position, this.moveContextFor(id, mesh.position));
     const currentY = this.currentY.get(id) ?? mesh.position.y;
     const nextY = currentY + (targetY - currentY) * smoothing;
     this.currentY.set(id, nextY);
     mesh.position.y = nextY;
   }
 
-  private toWorkspaceLocal(worldPosition: Vector3): Vector3 {
+  private createMoveContext(id: ObjectId, position: Vector3): SurfaceMoveContext {
+    const now = performance.now();
+    let anatomySample = this.workspace.anatomySurface.sampleTopSurfaceForDrag(
+      position.x,
+      position.z,
+    );
+
+    if (anatomySample) {
+      this.dragSurfaceMemory.set(id, {
+        x: position.x,
+        z: position.z,
+        sample: anatomySample,
+        at: now,
+      });
+    } else {
+      const memory = this.dragSurfaceMemory.get(id);
+      const frame = this.workspace.anatomySurface.frame;
+      const maximumDistance = frame
+        ? Math.max(0.008, Math.min(0.025, frame.width * 0.16))
+        : 0.012;
+      if (
+        memory
+        && now - memory.at <= DRAG_SURFACE_MEMORY_MS
+        && Math.hypot(position.x - memory.x, position.z - memory.z) <= maximumDistance
+      ) {
+        anatomySample = memory.sample;
+      } else if (memory) {
+        this.dragSurfaceMemory.delete(id);
+      }
+    }
+
+    const context = { x: position.x, z: position.z, anatomySample };
+    this.moveContexts.set(id, context);
+    return context;
+  }
+
+  private moveContextFor(id: ObjectId, position: Vector3): SurfaceMoveContext {
+    const existing = this.moveContexts.get(id);
+    return existing && this.contextMatches(existing, position)
+      ? existing
+      : this.createMoveContext(id, position);
+  }
+
+  private contextMatches(context: SurfaceMoveContext, position: Vector3): boolean {
+    return context.x === position.x && context.z === position.z;
+  }
+
+  private clearMoveContext(id: ObjectId): void {
+    this.moveContexts.delete(id);
+    this.dragSurfaceMemory.delete(id);
+  }
+
+  private toWorkspaceLocal(worldPosition: Vector3, inverseWorkspace?: Matrix): Vector3 {
+    if (inverseWorkspace) return Vector3.TransformCoordinates(worldPosition, inverseWorkspace);
     this.workspace.root.computeWorldMatrix(true);
     return Vector3.TransformCoordinates(
       worldPosition,
@@ -904,16 +997,16 @@ export class InteractionController {
   private inventoryPosition(clientX: number, clientY: number): Vector3 {
     const canvas = this.scene.getEngine().getRenderingCanvas();
     const camera = this.scene.activeCamera;
-    const safeEntryPosition = this.workspace.treatmentSnap.add(
-      new Vector3(0, 0, -INVENTORY_LONGITUDINAL_REACH),
-    );
+    const safeEntryPosition = this.workspace.treatmentSnap.clone();
+    safeEntryPosition.z -= INVENTORY_LONGITUDINAL_REACH;
     if (!canvas || !camera) return safeEntryPosition;
     const bounds = canvas.getBoundingClientRect();
     const x = (clientX - bounds.left) * this.scene.getEngine().getRenderWidth() / bounds.width;
     const y = (clientY - bounds.top) * this.scene.getEngine().getRenderHeight() / bounds.height;
-    const ray = this.scene.createPickingRay(x, y, Matrix.Identity(), camera);
+    const ray = this.scene.createPickingRay(x, y, PICKING_IDENTITY_MATRIX, camera);
     this.workspace.root.computeWorldMatrix(true);
     const world = this.workspace.root.getWorldMatrix();
+    const inverseWorkspace = Matrix.Invert(world);
     const planePoint = Vector3.TransformCoordinates(
       this.workspace.treatmentSnap,
       world,
@@ -921,7 +1014,10 @@ export class InteractionController {
     const planeNormal = camera.globalPosition.subtract(planePoint).normalize();
     const distance = ray.intersectsPlane(Plane.FromPositionAndNormal(planePoint, planeNormal));
     if (distance === null) return safeEntryPosition;
-    return this.toWorkspaceLocal(ray.origin.add(ray.direction.scale(distance)));
+    return this.toWorkspaceLocal(
+      ray.origin.add(ray.direction.scale(distance)),
+      inverseWorkspace,
+    );
   }
 
   private objectId(mesh: AbstractMesh): ObjectId | undefined {

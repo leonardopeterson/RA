@@ -14,6 +14,24 @@ export interface SurfaceSample {
   normal: Vector3;
 }
 
+export interface AnatomySurfaceDiagnostics {
+  dragQueries: number;
+  robustQueries: number;
+  raycasts: number;
+  hits: number;
+  misses: number;
+  retries: number;
+  totalMilliseconds: number;
+}
+
+interface CastContext {
+  workspaceWorld: Matrix;
+  inverseWorkspace: Matrix;
+}
+
+const ROBUST_SAMPLE_OFFSETS = [0, 0.004, -0.004, 0.008, -0.008, 0.014, -0.014, 0.022, -0.022];
+const PERFORMANCE_DEBUG = false;
+
 export interface AnatomyFrame {
   longitudinalAxis: HorizontalAxis;
   lateralAxis: HorizontalAxis;
@@ -58,6 +76,8 @@ export class AnatomySurface {
   private boundsMax = new Vector3(0.1, 0.25, 0.2);
   private currentFrame?: AnatomyFrame;
   private crossSectionCache = new Map<string, SurfaceSample[]>();
+  private performanceDebug = PERFORMANCE_DEBUG;
+  private diagnostics: AnatomySurfaceDiagnostics = this.emptyDiagnostics();
 
   constructor(private workspaceRoot: TransformNode) {}
 
@@ -74,6 +94,19 @@ export class AnatomySurface {
 
   get frame(): AnatomyFrame | undefined {
     return this.currentFrame;
+  }
+
+  setPerformanceDebug(enabled: boolean): void {
+    this.performanceDebug = enabled;
+    this.resetPerformanceDiagnostics();
+  }
+
+  getPerformanceDiagnostics(): Readonly<AnatomySurfaceDiagnostics> {
+    return { ...this.diagnostics };
+  }
+
+  resetPerformanceDiagnostics(): void {
+    this.diagnostics = this.emptyDiagnostics();
   }
 
   longitudinalCoordinate(point: Vector3): number {
@@ -134,30 +167,94 @@ export class AnatomySurface {
 
   sampleTopSurface(x: number, z: number): SurfaceSample | null {
     if (!this.ready) return null;
+    const context = this.createCastContext();
+    return this.sampleTopSurfaceWithContext(x, z, context);
+  }
 
+  sampleTopSurfaceForDrag(x: number, z: number): SurfaceSample | null {
+    const startedAt = this.performanceDebug ? performance.now() : 0;
+    if (this.performanceDebug) this.diagnostics.dragQueries += 1;
+    if (!this.ready || !this.isWithinHorizontalBounds(x, z)) {
+      this.finishDiagnosticQuery(startedAt, false);
+      return null;
+    }
+
+    const context = this.createCastContext();
+    const direct = this.sampleTopSurfaceWithContext(x, z, context);
+    if (direct) {
+      this.finishDiagnosticQuery(startedAt, true);
+      return direct;
+    }
+
+    const frame = this.currentFrame;
+    if (!frame) {
+      this.finishDiagnosticQuery(startedAt, false);
+      return null;
+    }
+
+    const edgeMargin = Math.min(0.008, frame.width * 0.10, frame.length * 0.025);
+    const nearEdge = x - this.boundsMin.x <= edgeMargin
+      || this.boundsMax.x - x <= edgeMargin
+      || z - this.boundsMin.z <= edgeMargin
+      || this.boundsMax.z - z <= edgeMargin;
+    if (!nearEdge) {
+      this.finishDiagnosticQuery(startedAt, false);
+      return null;
+    }
+
+    const inset = Math.min(0.004, frame.width * 0.06, frame.length * 0.015);
+    const correctedX = Math.max(this.boundsMin.x + inset, Math.min(this.boundsMax.x - inset, x));
+    const correctedZ = Math.max(this.boundsMin.z + inset, Math.min(this.boundsMax.z - inset, z));
+    if (correctedX === x && correctedZ === z) {
+      this.finishDiagnosticQuery(startedAt, false);
+      return null;
+    }
+
+    if (this.performanceDebug) this.diagnostics.retries += 1;
+    const corrected = this.sampleTopSurfaceWithContext(correctedX, correctedZ, context);
+    this.finishDiagnosticQuery(startedAt, Boolean(corrected));
+    return corrected;
+  }
+
+  private sampleTopSurfaceWithContext(x: number, z: number, context: CastContext): SurfaceSample | null {
     const margin = Math.max(0.08, (this.boundsMax.y - this.boundsMin.y) * 0.35);
     const origin = new Vector3(x, this.boundsMax.y + margin, z);
     const length = this.boundsMax.y - this.boundsMin.y + margin * 2;
-    return this.castLocal(origin, Vector3.Down(), length);
+    return this.castLocal(origin, Vector3.Down(), length, context);
   }
 
   sampleTopSurfaceClamped(x: number, z: number): SurfaceSample | null {
-    const direct = this.sampleTopSurface(x, z);
-    if (direct) return direct;
+    const startedAt = this.performanceDebug ? performance.now() : 0;
+    if (this.performanceDebug) this.diagnostics.robustQueries += 1;
+    if (!this.ready) {
+      this.finishDiagnosticQuery(startedAt, false);
+      return null;
+    }
+    const context = this.createCastContext();
+    const direct = this.sampleTopSurfaceWithContext(x, z, context);
+    if (direct) {
+      this.finishDiagnosticQuery(startedAt, true);
+      return direct;
+    }
 
     const frame = this.currentFrame;
-    if (!frame) return null;
+    if (!frame) {
+      this.finishDiagnosticQuery(startedAt, false);
+      return null;
+    }
 
     const inset = Math.min(0.004, frame.width * 0.06, frame.length * 0.015);
     const clampedX = Math.max(this.boundsMin.x + inset, Math.min(this.boundsMax.x - inset, x));
     const clampedZ = Math.max(this.boundsMin.z + inset, Math.min(this.boundsMax.z - inset, z));
 
-    const clamped = this.sampleTopSurface(clampedX, clampedZ);
-    if (clamped) return clamped;
+    const clamped = this.sampleTopSurfaceWithContext(clampedX, clampedZ, context);
+    if (clamped) {
+      this.finishDiagnosticQuery(startedAt, true);
+      return clamped;
+    }
 
-    const offsets = [0.004, -0.004, 0.008, -0.008, 0.014, -0.014, 0.022, -0.022];
-    for (const dx of [0, ...offsets]) {
-      for (const dz of [0, ...offsets]) {
+    for (const dx of ROBUST_SAMPLE_OFFSETS) {
+      for (const dz of ROBUST_SAMPLE_OFFSETS) {
         const candidateX = Math.max(
           this.boundsMin.x + inset,
           Math.min(this.boundsMax.x - inset, clampedX + dx),
@@ -166,11 +263,14 @@ export class AnatomySurface {
           this.boundsMin.z + inset,
           Math.min(this.boundsMax.z - inset, clampedZ + dz),
         );
-        const sample = this.sampleTopSurface(candidateX, candidateZ);
-        if (sample) return sample;
+        const sample = this.sampleTopSurfaceWithContext(candidateX, candidateZ, context);
+        if (sample) {
+          this.finishDiagnosticQuery(startedAt, true);
+          return sample;
+        }
       }
     }
-
+    this.finishDiagnosticQuery(startedAt, false);
     return null;
   }
 
@@ -373,21 +473,20 @@ export class AnatomySurface {
     originLocal: Vector3,
     directionLocal: Vector3,
     length: number,
+    context = this.createCastContext(),
   ): SurfaceSample | null {
-    this.workspaceRoot.computeWorldMatrix(true);
-    const workspaceWorld = this.workspaceRoot.getWorldMatrix();
-    const inverseWorkspace = Matrix.Invert(workspaceWorld);
+    const { workspaceWorld, inverseWorkspace } = context;
 
     const originWorld = Vector3.TransformCoordinates(originLocal, workspaceWorld);
     const directionWorld = Vector3.TransformNormal(directionLocal, workspaceWorld).normalize();
     const ray = new Ray(originWorld, directionWorld, length);
+    if (this.performanceDebug) this.diagnostics.raycasts += 1;
 
     let closestDistance = Number.POSITIVE_INFINITY;
     let closestPoint: Vector3 | undefined;
     let closestNormal: Vector3 | undefined;
 
     for (const mesh of this.meshes) {
-      mesh.computeWorldMatrix(true);
       const pick = ray.intersectsMesh(mesh, false);
       if (!pick.hit || !pick.pickedPoint || pick.distance >= closestDistance) continue;
 
@@ -401,6 +500,40 @@ export class AnatomySurface {
     return {
       point: Vector3.TransformCoordinates(closestPoint, inverseWorkspace),
       normal: Vector3.TransformNormal(closestNormal, inverseWorkspace).normalize(),
+    };
+  }
+
+  private createCastContext(): CastContext {
+    this.workspaceRoot.computeWorldMatrix(true);
+    for (const mesh of this.meshes) mesh.computeWorldMatrix(true);
+    const workspaceWorld = this.workspaceRoot.getWorldMatrix();
+    return {
+      workspaceWorld,
+      inverseWorkspace: Matrix.Invert(workspaceWorld),
+    };
+  }
+
+  private isWithinHorizontalBounds(x: number, z: number): boolean {
+    return x >= this.boundsMin.x && x <= this.boundsMax.x
+      && z >= this.boundsMin.z && z <= this.boundsMax.z;
+  }
+
+  private finishDiagnosticQuery(startedAt: number, hit: boolean): void {
+    if (!this.performanceDebug) return;
+    if (hit) this.diagnostics.hits += 1;
+    else this.diagnostics.misses += 1;
+    this.diagnostics.totalMilliseconds += performance.now() - startedAt;
+  }
+
+  private emptyDiagnostics(): AnatomySurfaceDiagnostics {
+    return {
+      dragQueries: 0,
+      robustQueries: 0,
+      raycasts: 0,
+      hits: 0,
+      misses: 0,
+      retries: 0,
+      totalMilliseconds: 0,
     };
   }
 

@@ -1197,9 +1197,9 @@ export function createWorkspace(scene: Scene): Workspace {
       legVisualRoot.parent = root;
 
       // Transformação já validada visualmente durante a calibração anterior.
-      legVisualRoot.position.set(-0.09, 0.085, 0.180);
+      legVisualRoot.position.set(0, 0.085, 0.180);
       legVisualRoot.rotation.set(Math.PI / 2, 0, Math.PI);
-      legVisualRoot.scaling.setAll(0.38);
+      legVisualRoot.scaling.setAll(0.540);
 
       const legRoot = result.meshes[0];
       legRoot.parent = legVisualRoot;
