@@ -43,7 +43,6 @@ ui.bind({
   enterAR: async () => {
     try {
       await workspace.anatomyReady;
-      await workspace.supportReady;
       ui.showExperience(true);
       ui.showPlacement();
       await ar.enter();
@@ -56,7 +55,6 @@ ui.bind({
 
   demo: async () => {
     await workspace.anatomyReady;
-    await workspace.supportReady;
     demoMode = true;
     context.scene.clearColor.set(0, 0, 0, 1);
     ui.showExperience(false);
@@ -89,11 +87,32 @@ ui.bind({
   },
 
   restart: () => location.reload(),
+
+  changeGameMode: async (mode) => {
+    await interaction.setGameMode(mode);
+    ui.notify(
+      mode === 'inventory'
+        ? 'Modo Padrão: arraste um material da barra.'
+        : 'Objetos sob a mesa ativados.',
+      'info',
+    );
+  },
+
+  prepareInventoryObject: (id) => {
+    void workspace.ensurePropReady(id);
+  },
+  inventoryDragStart: (id, clientX, clientY) => (
+    interaction.beginInventoryDrag(id, clientX, clientY)
+  ),
+  inventoryDragMove: (clientX, clientY) => interaction.updateInventoryDrag(clientX, clientY),
+  inventoryDragEnd: () => interaction.endInventoryDrag(),
+  canUseObject: (id) => activity.canPick(id),
+  isObjectHeld: (id) => activity.isHeld(id),
+  objectState: (id) => activity.objects.get(id)!.state,
 });
 
 void ar.isSupported().then((supported) => ui.setSupport(supported));
-void Promise.all([workspace.anatomyReady, workspace.supportReady])
-  .then(() => ui.setAssetsReady(true));
+void workspace.anatomyReady.then(() => ui.setAssetsReady(true));
 
 context.scene.onBeforeRenderObservable.add(() => {
   if (!placed) return;

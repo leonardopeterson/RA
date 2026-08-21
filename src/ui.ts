@@ -1,4 +1,5 @@
-import type { ActivitySnapshot, ObjectState } from './activity';
+import type { ActivitySnapshot, ObjectId, ObjectState } from './activity';
+import type { GameMode } from './workspace';
 
 function element<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -15,6 +16,26 @@ export interface UiCallbacks {
   release(): void;
   finish(): void;
   restart(): void;
+  changeGameMode(mode: GameMode): Promise<void>;
+  prepareInventoryObject(id: ObjectId): void;
+  inventoryDragStart(id: ObjectId, clientX: number, clientY: number): Promise<boolean>;
+  inventoryDragMove(clientX: number, clientY: number): void;
+  inventoryDragEnd(): void;
+  canUseObject(id: ObjectId): boolean;
+  isObjectHeld(id: ObjectId): boolean;
+  objectState(id: ObjectId): ObjectState;
+}
+
+interface InventoryGesture {
+  pointerId: number;
+  id: ObjectId;
+  button: HTMLButtonElement;
+  startX: number;
+  startY: number;
+  latestX: number;
+  latestY: number;
+  intent: 'pending' | 'scroll' | 'drag';
+  active: boolean;
 }
 
 export class UI {
@@ -25,9 +46,13 @@ export class UI {
   private summary = element<HTMLElement>('summary');
   private enter = element<HTMLButtonElement>('enter-ar');
   private demo = element<HTMLButtonElement>('demo-mode');
+  private inventory = element<HTMLElement>('inventory');
   private feedbackTimer?: number;
   private assetsReady = false;
   private webxrSupported = false;
+  private gameMode: GameMode = 'inventory';
+  private activityInteractive = false;
+  private inventoryGesture?: InventoryGesture;
 
   bind(callbacks: UiCallbacks): void {
     this.enter.onclick = callbacks.enterAR;
@@ -36,6 +61,15 @@ export class UI {
     element('reposition').onclick = callbacks.reposition;
     element('finish').onclick = callbacks.finish;
     element('restart').onclick = callbacks.restart;
+    document.querySelectorAll<HTMLImageElement>('.inventory-thumbnail').forEach((image) => {
+      const hideMissing = () => { if (!image.naturalWidth) image.hidden = true; };
+      image.addEventListener('error', hideMissing);
+      if (image.complete) hideMissing();
+    });
+    document.querySelectorAll<HTMLButtonElement>('[data-game-mode]').forEach((button) => {
+      button.onclick = () => void this.requestGameMode(button.dataset.gameMode as GameMode);
+    });
+    this.bindInventoryGestures();
     this.callbacks = callbacks;
   }
 
@@ -57,18 +91,22 @@ export class UI {
     this.topbar.classList.remove('hidden');
     this.hud.classList.remove('hidden');
     element('exit-ar').classList.toggle('hidden', !isXR);
+    this.applyGameModePresentation();
   }
 
   showPlacement(): void {
+    this.activityInteractive = false;
     element('step-number').textContent = 'POSICIONAMENTO';
     element('instruction').textContent = 'Aponte para uma superfície e toque para posicionar.';
     element('progress-label').textContent = '0 / 7';
     element<HTMLElement>('progress-bar').style.width = '0%';
     element('selection-card').classList.add('hidden');
     element('reposition').classList.add('hidden');
+    this.refreshInventory();
   }
 
   update(snapshot: ActivitySnapshot): void {
+    this.activityInteractive = true;
     const shownStep = Math.min(snapshot.step + 1, 7);
     element('step-number').textContent = snapshot.completed ? 'CURATIVO CONCLUÍDO' : `ETAPA ${shownStep}`;
     element('instruction').textContent = snapshot.instruction;
@@ -89,6 +127,12 @@ export class UI {
 
     element('reposition').classList.remove('hidden');
     element('finish').classList.toggle('hidden', !snapshot.completed);
+    this.refreshInventory();
+  }
+
+  setGameMode(mode: GameMode): void {
+    this.gameMode = mode;
+    this.applyGameModePresentation();
   }
 
   showSelection(name: string, state: ObjectState, held: boolean, canPick: boolean): void {
@@ -143,6 +187,7 @@ export class UI {
 
   showSummary(errors: number, elapsedMs: number): void {
     this.hud.classList.add('hidden');
+    this.inventory.classList.add('hidden');
     this.summary.classList.remove('hidden');
     element('summary-errors').textContent = String(errors);
 
@@ -155,5 +200,116 @@ export class UI {
     this.demo.disabled = !this.assetsReady;
     this.enter.setAttribute('aria-disabled', String(this.enter.disabled));
     this.demo.setAttribute('aria-disabled', String(this.demo.disabled));
+  }
+
+  private async requestGameMode(mode: GameMode): Promise<void> {
+    if (!this.callbacks || mode === this.gameMode) {
+      element<HTMLDetailsElement>('game-mode-menu').open = false;
+      return;
+    }
+    const menu = element<HTMLDetailsElement>('game-mode-menu');
+    menu.open = false;
+    menu.classList.add('is-loading');
+    try {
+      await this.callbacks.changeGameMode(mode);
+      this.setGameMode(mode);
+    } finally {
+      menu.classList.remove('is-loading');
+    }
+  }
+
+  private applyGameModePresentation(): void {
+    const inventoryMode = this.gameMode === 'inventory';
+    document.body.classList.toggle('inventory-mode', inventoryMode);
+    this.inventory.classList.toggle('hidden', !inventoryMode || this.topbar.classList.contains('hidden'));
+    document.querySelectorAll<HTMLButtonElement>('[data-game-mode]').forEach((button) => {
+      const selected = button.dataset.gameMode === this.gameMode;
+      button.setAttribute('aria-checked', String(selected));
+      const marker = button.querySelector('span');
+      if (marker) marker.textContent = selected ? '●' : '○';
+    });
+    this.refreshInventory();
+  }
+
+  private refreshInventory(): void {
+    if (!this.callbacks) return;
+    document.querySelectorAll<HTMLButtonElement>('[data-object-id]').forEach((button) => {
+      const id = button.dataset.objectId as ObjectId;
+      const state = this.callbacks!.objectState(id);
+      button.disabled = !this.activityInteractive || !this.callbacks!.canUseObject(id);
+      button.classList.toggle('is-active', this.callbacks!.isObjectHeld(id));
+      button.classList.toggle('is-done', ['returned', 'used', 'applied', 'completed'].includes(state));
+      button.setAttribute('aria-label', `${button.textContent?.trim() ?? id}: ${button.disabled ? 'indisponível' : 'disponível'}`);
+    });
+  }
+
+  private bindInventoryGestures(): void {
+    document.querySelectorAll<HTMLButtonElement>('[data-object-id]').forEach((button) => {
+      button.addEventListener('pointerdown', (event) => {
+        if (button.disabled || this.gameMode !== 'inventory') return;
+        this.callbacks?.prepareInventoryObject(button.dataset.objectId as ObjectId);
+        this.inventoryGesture = {
+          pointerId: event.pointerId,
+          id: button.dataset.objectId as ObjectId,
+          button,
+          startX: event.clientX,
+          startY: event.clientY,
+          latestX: event.clientX,
+          latestY: event.clientY,
+          intent: 'pending',
+          active: false,
+        };
+      });
+    });
+
+    window.addEventListener('pointermove', (event) => {
+      const gesture = this.inventoryGesture;
+      if (!gesture || event.pointerId !== gesture.pointerId) return;
+      gesture.latestX = event.clientX;
+      gesture.latestY = event.clientY;
+      const deltaX = event.clientX - gesture.startX;
+      const deltaY = event.clientY - gesture.startY;
+
+      if (gesture.intent === 'pending') {
+        if (Math.hypot(deltaX, deltaY) < 12) return;
+        if (Math.abs(deltaX) >= Math.abs(deltaY) || deltaY >= 0) {
+          gesture.intent = 'scroll';
+          return;
+        }
+        gesture.intent = 'drag';
+        gesture.button.classList.add('is-dragging');
+        void this.startInventoryGesture(gesture);
+      }
+
+      if (gesture.intent === 'drag') {
+        event.preventDefault();
+        if (gesture.active) this.callbacks?.inventoryDragMove(event.clientX, event.clientY);
+      }
+    }, { passive: false });
+
+    const finishGesture = (event: PointerEvent) => {
+      const gesture = this.inventoryGesture;
+      if (!gesture || event.pointerId !== gesture.pointerId) return;
+      this.inventoryGesture = undefined;
+      gesture.button.classList.remove('is-dragging');
+      if (gesture.active) this.callbacks?.inventoryDragEnd();
+    };
+    window.addEventListener('pointerup', finishGesture);
+    window.addEventListener('pointercancel', finishGesture);
+  }
+
+  private async startInventoryGesture(gesture: InventoryGesture): Promise<void> {
+    const started = await this.callbacks?.inventoryDragStart(
+      gesture.id,
+      gesture.latestX,
+      gesture.latestY,
+    );
+    if (!started) return;
+    if (this.inventoryGesture !== gesture) {
+      this.callbacks?.inventoryDragEnd();
+      return;
+    }
+    gesture.active = true;
+    this.callbacks?.inventoryDragMove(gesture.latestX, gesture.latestY);
   }
 }

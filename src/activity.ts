@@ -145,6 +145,12 @@ export class Activity {
     this.advance();
   }
 
+  cancelSolutionApplication(): void {
+    const solution = this.objects.get('solution-bottle')!;
+    if (solution.state === 'applying') solution.state = 'available';
+    this.release('solution-bottle');
+  }
+
   markSolutionReturned(): void {
     this.objects.get('solution-bottle')!.state = 'returned';
   }
@@ -227,7 +233,7 @@ export class Activity {
   completeBandageWrap(id: BandageId): boolean {
     const expectedStep = id === 'bandage-1' ? 5 : 6;
     if (this.step !== expectedStep || !this.isHeld(id) || this.objects.get(id)!.state !== 'wrapping') {
-      return this.invalid(id, 'Complete a sequência direita, centro, esquerda e retorno.');
+      return this.invalid(id, 'Complete a sequência lateral, centro, lateral oposta e retorno.');
     }
     this.wrapCounts[id] = Math.min(BANDAGE_WRAP_TARGET, this.wrapCounts[id] + 1);
     this.events.emit('bandage_wrap_completed', { object: id, target: 'lower-leg', step: expectedStep + 1, wrap: this.wrapCounts[id] });

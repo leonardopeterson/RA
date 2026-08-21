@@ -5,6 +5,7 @@ import {
   HighlightLayer,
   Matrix,
   Mesh,
+  Plane,
   PointerDragBehavior,
   PointerEventTypes,
   Quaternion,
@@ -18,6 +19,7 @@ import { rotationFromUpToNormal } from './anatomySurface';
 import {
   TREATMENT_MANIPULATION_SURFACE,
   WORKSPACE,
+  type GameMode,
   type Workspace,
 } from './workspace';
 
@@ -33,6 +35,8 @@ const BANDAGE_TARGET_BLEND = 0.42;
 const MIN_MOVEMENT_DISTANCE = 0.0015;
 const MAX_MOVEMENT_SAMPLE_SECONDS = 0.1;
 const TREATMENT_CONTACT_RADIUS = 0.050;
+const INVENTORY_LATERAL_REACH = 0.15;
+const INVENTORY_LONGITUDINAL_REACH = 0.17;
 
 const SURFACE_CONTACT_OFFSETS: Partial<Record<ObjectId, number>> = {
   'debrisoft-pad': 0.006,
@@ -41,11 +45,12 @@ const SURFACE_CONTACT_OFFSETS: Partial<Record<ObjectId, number>> = {
 };
 
 type BandagePassState =
-  | 'WAIT_RIGHT_START'
+  | 'WAIT_START'
   | 'FRONT_WAIT_CENTER'
-  | 'FRONT_WAIT_LEFT'
+  | 'FRONT_WAIT_OPPOSITE'
   | 'BACK_WAIT_CENTER'
-  | 'BACK_WAIT_RIGHT';
+  | 'BACK_WAIT_START';
+type BandageStartSide = 'left' | 'right';
 
 interface BandageSurfaceMemory {
   y: number;
@@ -62,13 +67,15 @@ export class InteractionController {
   private lastDebridementPosition?: Vector3;
   private lastMovementAt?: number;
   private solutionAnimationRunning = false;
+  private solutionAnimationGeneration = 0;
   private poseAnimations = new Set<ObjectId>();
+  private inventoryDragging?: ObjectId;
 
   private tapeStrokeStart?: Vector3;
   private tapeCompletedPasses = 0;
-  private tapeFirstDirection?: -1 | 1;
 
-  private bandagePassState: BandagePassState = 'WAIT_RIGHT_START';
+  private bandagePassState: BandagePassState = 'WAIT_START';
+  private bandageStartSide?: BandageStartSide;
   private activeBandage?: BandageId;
   private lastBandageLateral?: number;
   private bandageSurfaceMemory = new Map<BandageId, BandageSurfaceMemory>();
@@ -120,12 +127,94 @@ export class InteractionController {
     this.ui.update(this.activity.snapshot);
 
     if (this.selected === 'tape-strip') {
-      this.ui.notify('Atravesse a gaze com o rolo e depois faça o caminho de volta.', 'info');
+      this.ui.notify('Atravesse a gaze duas vezes, começando por qualquer lado.', 'info');
     } else if (this.isBandage(this.selected)) {
-      this.ui.notify('Inicie pelo lado direito e contorne o membro.', 'info');
+      this.ui.notify('Inicie por qualquer lateral e contorne o membro.', 'info');
     } else {
       this.ui.notify('Objeto em mãos. Arraste-o com o dedo.', 'info');
     }
+  }
+
+  async beginInventoryDrag(id: ObjectId, clientX: number, clientY: number): Promise<boolean> {
+    if (this.workspace.gameMode !== 'inventory' || !this.activity.canPick(id)) return false;
+    this.workspace.setInventoryPropActive(id, true);
+    void this.workspace.ensurePropReady(id);
+    const mesh = this.workspace.pickables.get(id)!;
+    const pointerPosition = this.inventoryPosition(clientX, clientY);
+    mesh.position.x = pointerPosition.x;
+    mesh.position.z = pointerPosition.z;
+    mesh.rotationQuaternion = null;
+    mesh.rotation.set(...OBJECT_INITIAL_POSES[id].rotation);
+    this.currentY.set(id, this.calculateTargetY(id, mesh.position));
+    this.targetY.set(id, this.currentY.get(id)!);
+    mesh.position.y = this.currentY.get(id)!;
+
+    this.select(id);
+    if (!this.activity.pick(id)) {
+      this.workspace.setInventoryPropActive(id, false);
+      return false;
+    }
+    this.inventoryDragging = id;
+    this.drags.get(id)!.enabled = false;
+    this.ui.update(this.activity.snapshot);
+    this.refreshSelection(id);
+    return true;
+  }
+
+  updateInventoryDrag(clientX: number, clientY: number): void {
+    const id = this.inventoryDragging;
+    if (!id || !this.activity.isHeld(id)) return;
+    const mesh = this.workspace.pickables.get(id)!;
+    const pointerPosition = this.inventoryPosition(clientX, clientY);
+    mesh.position.x = pointerPosition.x;
+    mesh.position.z = pointerPosition.z;
+    this.validateMove(id);
+    this.updateObjectHeight(id);
+  }
+
+  endInventoryDrag(): void {
+    if (!this.inventoryDragging) return;
+    this.inventoryDragging = undefined;
+    this.releaseSelected();
+  }
+
+  cancelActiveManipulable(): void {
+    const id = this.inventoryDragging ?? this.selected;
+    this.inventoryDragging = undefined;
+    if (!id || !this.activity.isHeld(id)) {
+      this.clearSelectionState();
+      return;
+    }
+
+    if (id === 'solution-bottle' && this.solutionAnimationRunning) {
+      this.solutionAnimationGeneration += 1;
+      this.solutionAnimationRunning = false;
+      this.activity.cancelSolutionApplication();
+      this.workspace.solutionPourPivot.rotationQuaternion = null;
+      this.workspace.solutionPourPivot.rotation.set(0, 0, 0);
+    } else if (id === 'tape-strip') {
+      this.activity.cancelTapeApplication();
+      this.workspace.resetTapeStrips();
+      this.resetTapeTraversal();
+    } else if (this.isBandage(id)) {
+      this.activity.cancelBandagePass(id);
+      this.resetBandagePass();
+      this.workspace.pickables.get(id)!.visibility = 1;
+    } else {
+      this.activity.release(id);
+    }
+    this.drags.get(id)!.enabled = false;
+    this.currentY.delete(id);
+    this.targetY.delete(id);
+    this.workspace.setInventoryPropActive(id, false);
+    this.clearSelectionState();
+    this.ui.update(this.activity.snapshot);
+  }
+
+  async setGameMode(mode: GameMode): Promise<void> {
+    this.cancelActiveManipulable();
+    await this.workspace.setGameMode(mode, this.activity.objects);
+    this.workspace.syncObjectVisibility(this.activity.objects);
   }
 
   releaseSelected(): void {
@@ -142,6 +231,7 @@ export class InteractionController {
     } else if (id === 'gauze' && this.isOnTreatment(mesh.position)) {
       if (this.activity.applyGauze()) {
         this.workspace.setGauzeApplied(true);
+        this.workspace.setInventoryPropActive(id, false);
         this.drags.get(id)!.enabled = false;
         this.currentY.delete(id);
         this.targetY.delete(id);
@@ -154,20 +244,26 @@ export class InteractionController {
       this.workspace.resetTapeStrips();
       this.resetTapeTraversal();
       if (incomplete) {
-        this.ui.notify('Fixação incompleta. Atravesse a gaze e faça a passada de retorno.', 'error');
+        this.ui.notify('Fixação incompleta. Faça duas passadas completas sobre a gaze.', 'error');
       }
       void this.returnToInitialPose(id);
     } else if (this.isBandage(id)) {
-      const incomplete = this.bandagePassState !== 'WAIT_RIGHT_START';
+      const incomplete = this.bandagePassState !== 'WAIT_START';
+      const startSide = this.bandageStartSide;
       this.activity.cancelBandagePass(id);
       this.resetBandagePass();
       mesh.visibility = 1;
-      if (incomplete) this.ui.notify('Volta incompleta. Retorne ao lado direito.', 'error');
-      void this.returnBandageToRight(id);
+      if (incomplete) this.ui.notify('Volta incompleta. Reinicie por uma das laterais.', 'error');
+      void this.returnBandageToSide(id, startSide);
     } else {
       this.activity.release(id);
       this.targetY.set(id, this.calculateTargetY(id, mesh.position));
       if (id === 'solution-bottle') void this.returnToInitialPose(id);
+      else if (this.workspace.gameMode === 'inventory') {
+        this.currentY.delete(id);
+        this.targetY.delete(id);
+        this.workspace.setInventoryPropActive(id, false);
+      }
     }
 
     this.drags.get(id)!.enabled = false;
@@ -217,14 +313,20 @@ export class InteractionController {
 
   private validateMove(id: ObjectId): void {
     const mesh = this.workspace.pickables.get(id)!;
-    mesh.position.x = Math.max(
-      -WORKSPACE.halfWidth + 0.025,
-      Math.min(WORKSPACE.halfWidth - 0.025, mesh.position.x),
-    );
-    mesh.position.z = Math.max(
-      -WORKSPACE.halfDepth + 0.025,
-      Math.min(WORKSPACE.halfDepth - 0.025, mesh.position.z),
-    );
+    const minX = this.workspace.gameMode === 'inventory'
+      ? this.workspace.treatmentSnap.x - INVENTORY_LATERAL_REACH
+      : -WORKSPACE.halfWidth + 0.025;
+    const maxX = this.workspace.gameMode === 'inventory'
+      ? this.workspace.treatmentSnap.x + INVENTORY_LATERAL_REACH
+      : WORKSPACE.halfWidth - 0.025;
+    const minZ = this.workspace.gameMode === 'inventory'
+      ? this.workspace.treatmentSnap.z - INVENTORY_LONGITUDINAL_REACH
+      : -WORKSPACE.halfDepth + 0.025;
+    const maxZ = this.workspace.gameMode === 'inventory'
+      ? this.workspace.treatmentSnap.z + INVENTORY_LONGITUDINAL_REACH
+      : WORKSPACE.halfDepth - 0.025;
+    mesh.position.x = Math.max(minX, Math.min(maxX, mesh.position.x));
+    mesh.position.z = Math.max(minZ, Math.min(maxZ, mesh.position.z));
 
     this.targetY.set(id, this.calculateTargetY(id, mesh.position));
     mesh.position.y = this.currentY.get(id) ?? mesh.position.y;
@@ -284,22 +386,13 @@ export class InteractionController {
       && Math.abs(deltaLateral) >= area.minCrossLateral;
     if (!crossedLateral) return;
 
-    const direction: -1 | 1 = deltaLateral < 0 ? -1 : 1;
-    if (this.tapeFirstDirection === direction) {
-      this.tapeStrokeStart = undefined;
-      this.ui.notify('Faça a segunda passada no sentido de retorno.', 'info');
-      return;
-    }
-
     const strip = this.tapeCompletedPasses === 0 ? 'lateral' : 'longitudinal';
     this.workspace.tapeAppliedStrips[strip].setEnabled(true);
     this.tapeCompletedPasses += 1;
 
     if (this.tapeCompletedPasses === 1) {
-      this.tapeFirstDirection = direction;
-      // A posição final da primeira passada já é o início natural do retorno.
-      this.tapeStrokeStart = position.clone();
-      this.ui.notify('Primeira fita aplicada. Agora faça o caminho de volta.', 'success');
+      this.tapeStrokeStart = undefined;
+      this.ui.notify('Primeira fita aplicada. Atravesse novamente por qualquer lado.', 'success');
       return;
     }
 
@@ -317,14 +410,14 @@ export class InteractionController {
     void this.returnToInitialPose('tape-strip').then(() => {
       this.tapeStrokeStart = undefined;
       this.tapeCompletedPasses = 0;
-      this.tapeFirstDirection = undefined;
     });
   }
 
   private updateBandageWrapping(id: BandageId, position: Vector3): void {
     if (this.activeBandage !== id) {
       this.activeBandage = id;
-      this.bandagePassState = 'WAIT_RIGHT_START';
+      this.bandagePassState = 'WAIT_START';
+      this.bandageStartSide = undefined;
       this.lastBandageLateral = undefined;
     }
 
@@ -349,39 +442,45 @@ export class InteractionController {
 
     const bandage = this.workspace.pickables.get(id)!;
     const backPass = this.bandagePassState === 'BACK_WAIT_CENTER'
-      || this.bandagePassState === 'BACK_WAIT_RIGHT';
+      || this.bandagePassState === 'BACK_WAIT_START';
     bandage.visibility = backPass
       && Math.abs(lateral - zones.centerLateral) < zones.backHideHalfSpan
       ? 0
       : 1;
 
     switch (this.bandagePassState) {
-      case 'WAIT_RIGHT_START':
-        if (!rightReached || !this.activity.beginBandageWrapping(id)) return;
+      case 'WAIT_START':
+        if (!rightReached && !leftReached) return;
+        if (!this.activity.beginBandageWrapping(id)) return;
+        this.bandageStartSide = rightReached ? 'right' : 'left';
         this.bandagePassState = 'FRONT_WAIT_CENTER';
         this.ui.notify('Passe pela frente do membro.', 'info');
         this.refreshSelection(id);
         break;
 
       case 'FRONT_WAIT_CENTER':
-        if (!reachedCenterFromRight) return;
-        this.bandagePassState = 'FRONT_WAIT_LEFT';
-        if (leftReached) this.enterBandageBackPass();
+        if (this.bandageStartSide === 'right' ? !reachedCenterFromRight : !reachedCenterFromLeft) return;
+        this.bandagePassState = 'FRONT_WAIT_OPPOSITE';
+        if (this.bandageStartSide === 'right' ? leftReached : rightReached) {
+          this.enterBandageBackPass();
+        }
         break;
 
-      case 'FRONT_WAIT_LEFT':
-        if (!leftReached) return;
+      case 'FRONT_WAIT_OPPOSITE':
+        if (this.bandageStartSide === 'right' ? !leftReached : !rightReached) return;
         this.enterBandageBackPass();
         break;
 
       case 'BACK_WAIT_CENTER':
-        if (!reachedCenterFromLeft) return;
-        this.bandagePassState = 'BACK_WAIT_RIGHT';
-        if (rightReached) this.completeBandageRevolution(id);
+        if (this.bandageStartSide === 'right' ? !reachedCenterFromLeft : !reachedCenterFromRight) return;
+        this.bandagePassState = 'BACK_WAIT_START';
+        if (this.bandageStartSide === 'right' ? rightReached : leftReached) {
+          this.completeBandageRevolution(id);
+        }
         break;
 
-      case 'BACK_WAIT_RIGHT':
-        if (!rightReached) return;
+      case 'BACK_WAIT_START':
+        if (this.bandageStartSide === 'right' ? !rightReached : !leftReached) return;
         this.completeBandageRevolution(id);
         break;
     }
@@ -399,7 +498,9 @@ export class InteractionController {
 
     const bandage = this.workspace.pickables.get(id)!;
     bandage.visibility = 1;
-    this.lastBandageLateral = this.workspace.bandageZones.rightTrigger;
+    this.lastBandageLateral = this.bandageStartSide === 'left'
+      ? this.workspace.bandageZones.leftTrigger
+      : this.workspace.bandageZones.rightTrigger;
 
     if (completed) {
       this.drags.get(id)!.enabled = false;
@@ -408,6 +509,7 @@ export class InteractionController {
       this.bandageSurfaceMemory.delete(id);
       this.bandageTargetMemory.delete(id);
       bandage.setEnabled(false);
+      this.workspace.setInventoryPropActive(id, false);
       this.resetBandagePass();
       this.ui.notify(
         id === 'bandage-1' ? 'Primeira camada concluída.' : 'CURATIVO CONCLUÍDO',
@@ -415,7 +517,7 @@ export class InteractionController {
       );
       this.refreshSelection(id);
     } else {
-      // A volta terminou no lado direito. A próxima pode começar dali sem exigir
+      // A volta terminou no lado inicial. A próxima pode começar dali sem exigir
       // que o usuário acerte novamente uma pequena zona de início.
       this.bandagePassState = 'FRONT_WAIT_CENTER';
       this.ui.notify(
@@ -465,30 +567,42 @@ export class InteractionController {
   private async animateSolutionApplication(): Promise<void> {
     if (this.solutionAnimationRunning || !this.activity.beginSolutionApplication()) return;
     this.solutionAnimationRunning = true;
+    const generation = ++this.solutionAnimationGeneration;
     const id: ObjectId = 'solution-bottle';
-    const bottle = this.workspace.pickables.get(id)!;
     this.drags.get(id)!.enabled = false;
     this.refreshSelection(id);
     this.currentY.delete(id);
     this.targetY.delete(id);
 
-    const initialRotation = Quaternion.FromEulerAngles(...OBJECT_INITIAL_POSES[id].rotation);
-    const pouringRotation = initialRotation.multiply(
-      Quaternion.RotationAxis(Axis.Z, 160 * Math.PI / 180),
-    );
-    await this.animatePose(bottle, bottle.position.clone(), pouringRotation, 420);
+    const pourPivot = this.workspace.solutionPourPivot;
+    const initialRotation = Quaternion.Identity();
+    const pouringRotation = Quaternion.RotationAxis(Axis.Z, 110 * Math.PI / 180);
+    await this.animatePose(pourPivot, pourPivot.position.clone(), pouringRotation, 420);
+    if (generation !== this.solutionAnimationGeneration) return;
     await new Promise((resolve) => window.setTimeout(resolve, 650));
+    if (generation !== this.solutionAnimationGeneration) return;
     this.activity.completeSolutionApplication();
     this.ui.update(this.activity.snapshot);
     this.ui.notify('Solução aplicada. Inicie o debridamento.', 'success');
+    await this.animatePose(pourPivot, pourPivot.position.clone(), initialRotation, 280);
+    if (generation !== this.solutionAnimationGeneration) return;
     await this.returnToInitialPose(id);
+    if (generation !== this.solutionAnimationGeneration) return;
     this.activity.markSolutionReturned();
+    this.ui.update(this.activity.snapshot);
     this.solutionAnimationRunning = false;
     this.refreshSelection(id);
   }
 
   private async returnToInitialPose(id: ObjectId): Promise<void> {
     const mesh = this.workspace.pickables.get(id)!;
+    if (this.workspace.gameMode === 'inventory') {
+      this.currentY.delete(id);
+      this.targetY.delete(id);
+      this.workspace.setInventoryPropActive(id, false);
+      this.refreshSelection(id);
+      return;
+    }
     const pose = OBJECT_INITIAL_POSES[id];
     const targetPosition = new Vector3(...pose.position);
     targetPosition.y = this.workspace.supportSurface.getTargetY(mesh, targetPosition, {
@@ -512,8 +626,20 @@ export class InteractionController {
     this.refreshSelection(id);
   }
 
-  private async returnBandageToRight(id: BandageId): Promise<void> {
+  private async returnBandageToSide(
+    id: BandageId,
+    side: BandageStartSide = 'right',
+  ): Promise<void> {
     const mesh = this.workspace.pickables.get(id)!;
+    if (this.workspace.gameMode === 'inventory') {
+      this.currentY.delete(id);
+      this.targetY.delete(id);
+      this.bandageSurfaceMemory.delete(id);
+      this.bandageTargetMemory.delete(id);
+      this.workspace.setInventoryPropActive(id, false);
+      this.refreshSelection(id);
+      return;
+    }
     this.poseAnimations.add(id);
     this.refreshSelection(id);
     this.currentY.delete(id);
@@ -521,21 +647,25 @@ export class InteractionController {
     this.bandageSurfaceMemory.delete(id);
     this.bandageTargetMemory.delete(id);
 
+    const target = side === 'left'
+      ? this.workspace.bandageZones.left.clone()
+      : this.workspace.bandageRestartPoses[id].clone();
+    if (side === 'left') target.y = this.workspace.bandageRestartPoses[id].y;
     await this.animatePose(
       mesh,
-      this.workspace.bandageRestartPoses[id],
+      target,
       Quaternion.FromEulerAngles(...OBJECT_INITIAL_POSES[id].rotation),
       520,
     );
 
-    this.currentY.set(id, this.workspace.bandageRestartPoses[id].y);
-    this.targetY.set(id, this.workspace.bandageRestartPoses[id].y);
+    this.currentY.set(id, target.y);
+    this.targetY.set(id, target.y);
     this.poseAnimations.delete(id);
     this.refreshSelection(id);
   }
 
   private animatePose(
-    mesh: AbstractMesh,
+    mesh: TransformNode,
     targetPosition: Vector3,
     targetRotation: Quaternion,
     durationMs: number,
@@ -585,11 +715,11 @@ export class InteractionController {
   private resetTapeTraversal(): void {
     this.tapeStrokeStart = undefined;
     this.tapeCompletedPasses = 0;
-    this.tapeFirstDirection = undefined;
   }
 
   private resetBandagePass(): void {
-    this.bandagePassState = 'WAIT_RIGHT_START';
+    this.bandagePassState = 'WAIT_START';
+    this.bandageStartSide = undefined;
     this.activeBandage = undefined;
     this.lastBandageLateral = undefined;
   }
@@ -647,18 +777,22 @@ export class InteractionController {
 
   private calculateTargetY(id: ObjectId, localPosition: Vector3): number {
     const mesh = this.workspace.pickables.get(id)!;
-    const supportY = this.workspace.supportSurface.getTargetY(mesh, localPosition, {
-      preferredSupport: 'metal-tray',
-    });
+    const supportY = this.workspace.gameMode === 'inventory'
+      ? this.workspace.treatmentSnap.y + this.activity.objects.get(id)!.treatmentOffset
+      : this.workspace.supportSurface.getTargetY(mesh, localPosition, {
+          preferredSupport: 'metal-tray',
+        });
 
     if (this.isBandage(id)) {
       let rawTarget: number;
       if (
         this.activeBandage === id
         && (this.bandagePassState === 'BACK_WAIT_CENTER'
-          || this.bandagePassState === 'BACK_WAIT_RIGHT')
+          || this.bandagePassState === 'BACK_WAIT_START')
       ) {
-        rawTarget = supportY;
+        rawTarget = this.workspace.gameMode === 'inventory'
+          ? this.workspace.treatmentSnap.y - 0.09
+          : supportY;
       } else {
         const treatmentY = this.bandageSurfaceTargetY(id, localPosition);
         const blend = this.bandageSurfaceBlend(localPosition);
@@ -767,6 +901,29 @@ export class InteractionController {
     );
   }
 
+  private inventoryPosition(clientX: number, clientY: number): Vector3 {
+    const canvas = this.scene.getEngine().getRenderingCanvas();
+    const camera = this.scene.activeCamera;
+    const safeEntryPosition = this.workspace.treatmentSnap.add(
+      new Vector3(0, 0, -INVENTORY_LONGITUDINAL_REACH),
+    );
+    if (!canvas || !camera) return safeEntryPosition;
+    const bounds = canvas.getBoundingClientRect();
+    const x = (clientX - bounds.left) * this.scene.getEngine().getRenderWidth() / bounds.width;
+    const y = (clientY - bounds.top) * this.scene.getEngine().getRenderHeight() / bounds.height;
+    const ray = this.scene.createPickingRay(x, y, Matrix.Identity(), camera);
+    this.workspace.root.computeWorldMatrix(true);
+    const world = this.workspace.root.getWorldMatrix();
+    const planePoint = Vector3.TransformCoordinates(
+      this.workspace.treatmentSnap,
+      world,
+    );
+    const planeNormal = camera.globalPosition.subtract(planePoint).normalize();
+    const distance = ray.intersectsPlane(Plane.FromPositionAndNormal(planePoint, planeNormal));
+    if (distance === null) return safeEntryPosition;
+    return this.toWorkspaceLocal(ray.origin.add(ray.direction.scale(distance)));
+  }
+
   private objectId(mesh: AbstractMesh): ObjectId | undefined {
     let node: TransformNode | null = mesh;
     while (node) {
@@ -820,6 +977,12 @@ export class InteractionController {
     this.meshes(this.selected).forEach((mesh) => {
       this.highlight.removeMesh(mesh as Mesh);
     });
+  }
+
+  private clearSelectionState(): void {
+    this.clearHighlight();
+    this.selected = undefined;
+    this.ui.clearSelection();
   }
 
   private isBandage(id: ObjectId): id is BandageId {

@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
-    <meta name="theme-color" content="#000000" />
-    <title>Estação Clínica AR</title>
+    <meta name="theme-color" content="#D4FFC9" />
+    <title>Simulação AR</title>
   </head>
   <body>
     <canvas id="render-canvas"></canvas>
@@ -15,7 +15,20 @@
           <span class="brand-mark">+</span>
           <span>Treinamento AR</span>
         </div>
-        <button id="exit-ar" class="ghost hidden" type="button">Sair da RA</button>
+        <div class="topbar-actions">
+          <details id="game-mode-menu" class="game-mode-menu">
+            <summary>Modo de jogo <span aria-hidden="true">▾</span></summary>
+            <div class="game-mode-options" role="menu">
+              <button type="button" data-game-mode="inventory" role="menuitemradio" aria-checked="true">
+                <span aria-hidden="true">●</span> Padrão
+              </button>
+              <button type="button" data-game-mode="tabletop" role="menuitemradio" aria-checked="false">
+                <span aria-hidden="true">○</span> Objetos sob a mesa
+              </button>
+            </div>
+          </details>
+          <button id="exit-ar" class="ghost hidden" type="button">Sair da RA</button>
+        </div>
       </header>
 
       <main id="welcome" class="welcome">
@@ -54,6 +67,35 @@
           <button id="finish" class="primary compact hidden" type="button">Finalizar atividade</button>
         </div>
       </section>
+
+      <nav id="inventory" class="inventory hidden" aria-label="Materiais clínicos">
+        <div class="inventory-track">
+          <button class="inventory-item" type="button" data-object-id="debrisoft-pad">
+            <span class="inventory-icon icon-debrisoft" aria-hidden="true"><img class="inventory-thumbnail" src="./ui-icons/debrisoft.png" alt="" draggable="false" /></span>
+            <span class="inventory-name">Debri.</span>
+          </button>
+          <button class="inventory-item" type="button" data-object-id="solution-bottle">
+            <span class="inventory-icon icon-solution" aria-hidden="true"><img class="inventory-thumbnail" src="./ui-icons/solution-bottle.png" alt="" draggable="false" /></span>
+            <span class="inventory-name">Solução</span>
+          </button>
+          <button class="inventory-item" type="button" data-object-id="gauze">
+            <span class="inventory-icon icon-gauze" aria-hidden="true"><img class="inventory-thumbnail" src="./ui-icons/gauze.png" alt="" draggable="false" /></span>
+            <span class="inventory-name">Gaze</span>
+          </button>
+          <button class="inventory-item" type="button" data-object-id="tape-strip">
+            <span class="inventory-icon icon-tape" aria-hidden="true"><img class="inventory-thumbnail" src="./ui-icons/tape-roll.png" alt="" draggable="false" /></span>
+            <span class="inventory-name">Tape</span>
+          </button>
+          <button class="inventory-item" type="button" data-object-id="bandage-1">
+            <span class="inventory-icon icon-bandage" aria-hidden="true"><img class="inventory-thumbnail" src="./ui-icons/bandage-1.png" alt="" draggable="false" /></span>
+            <span class="inventory-name">Faixa 1</span>
+          </button>
+          <button class="inventory-item" type="button" data-object-id="bandage-2">
+            <span class="inventory-icon icon-bandage second" aria-hidden="true"><img class="inventory-thumbnail" src="./ui-icons/bandage-2.png" alt="" draggable="false" /></span>
+            <span class="inventory-name">Faixa 2</span>
+          </button>
+        </div>
+      </nav>
 
       <section id="summary" class="summary panel hidden">
         <div class="success-icon">✓</div>

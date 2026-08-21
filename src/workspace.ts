@@ -16,7 +16,12 @@ import {
   Vector3,
   VertexData,
 } from '@babylonjs/core';
-import { OBJECT_INITIAL_POSES, type BandageId, type ObjectId } from './activity';
+import {
+  OBJECT_INITIAL_POSES,
+  type ActivityObjectState,
+  type BandageId,
+  type ObjectId,
+} from './activity';
 import {
   AnatomySurface,
   type HorizontalAxis,
@@ -30,6 +35,8 @@ export const WORKSPACE = {
   halfDepth: 0.20,
   surfaceY: 0.026,
 } as const;
+
+export type GameMode = 'inventory' | 'tabletop';
 
 const MODEL_ROOT = `${import.meta.env.BASE_URL}models/`;
 const MODELS = {
@@ -126,11 +133,13 @@ export interface Workspace {
   anatomyReady: Promise<void>;
   supportSurface: SupportSurfaceSystem;
   supportReady: Promise<void>;
+  readonly gameMode: GameMode;
   placementIndicator: Mesh;
   pickables: Map<ObjectId, AbstractMesh>;
   treatmentSurface: Mesh;
   treatmentSnap: Vector3;
   solutionZone: Vector3;
+  solutionPourPivot: TransformNode;
   tapeApplicationArea: TapeApplicationArea;
   tapeAppliedStrips: Record<TapeStripId, Mesh>;
   bandageZones: BandageZones;
@@ -138,6 +147,10 @@ export interface Workspace {
   bandageLayerSegments: Record<BandageId, Mesh[]>;
   resetTapeStrips(): void;
   setGauzeApplied(applied: boolean): void;
+  ensurePropReady(id: ObjectId): Promise<void>;
+  setGameMode(mode: GameMode, objects: ReadonlyMap<ObjectId, ActivityObjectState>): Promise<void>;
+  setInventoryPropActive(id: ObjectId, active: boolean): void;
+  syncObjectVisibility(objects: ReadonlyMap<ObjectId, ActivityObjectState>): void;
   resetObjects(): void;
 }
 
@@ -338,30 +351,6 @@ function applyAutomaticOrientation(
   else if (smallest === 'z') contentRoot.rotation.y = Math.PI / 2;
 }
 
-async function attachNormalizedGlb(
-  scene: Scene,
-  logicalRoot: TransformNode,
-  filename: string,
-  options: AssetVisualOptions,
-): Promise<AbstractMesh[]> {
-  const result = await SceneLoader.ImportMeshAsync('', MODEL_ROOT, filename, scene);
-  const visualMeshes = result.meshes.filter((mesh) => mesh.getTotalVertices() > 0);
-  if (!visualMeshes.length) throw new Error(`${filename} não possui malhas renderizáveis.`);
-
-  const importedNodes: Node[] = [...result.meshes, ...result.transformNodes];
-  const importedSet = new Set(importedNodes);
-  const topLevelNodes = importedNodes.filter((node) => !node.parent || !importedSet.has(node.parent));
-
-  return attachNormalizedNodes(
-    scene,
-    logicalRoot,
-    filename,
-    options,
-    topLevelNodes,
-    visualMeshes,
-  );
-}
-
 function attachNormalizedContainerInstance(
   scene: Scene,
   logicalRoot: TransformNode,
@@ -454,6 +443,15 @@ export function createWorkspace(scene: Scene): Workspace {
   const anatomySurface = new AnatomySurface(root);
   const appliedSurface = new AppliedSurfaceSystem(anatomySurface, root);
   const supportSurface = new SupportSurfaceSystem(root);
+  const assetContainers = new Map<string, Promise<AssetContainer>>();
+  const containerFor = (filename: string): Promise<AssetContainer> => {
+    let pending = assetContainers.get(filename);
+    if (!pending) {
+      pending = SceneLoader.LoadAssetContainerAsync(MODEL_ROOT, filename, scene);
+      assetContainers.set(filename, pending);
+    }
+    return pending;
+  };
 
   const indicator = MeshBuilder.CreateTorus(
     'placement-indicator',
@@ -493,23 +491,34 @@ export function createWorkspace(scene: Scene): Workspace {
   trayFallback.material = material(scene, 'tray-fallback-material', '#829b94', 0.35);
   trayFallback.isPickable = false;
 
-  const trayReady = attachNormalizedGlb(scene, trayRoot, MODELS.metalTray, {
-    orientation: 'flat',
-    alignment: 'base',
-    metric: 'footprint',
-    targetSize: METAL_TRAY_TARGET_FOOTPRINT,
-    pickable: false,
-  }).then((meshes) => {
-    trayFallback.setEnabled(false);
-    return meshes;
-  }).catch((error) => {
-    console.warn('Falha ao carregar metal_tray.glb; usando bandeja provisória.', error);
-    return [trayFallback];
-  }).then((meshes) => {
-    supportSurface.invalidateObjectBounds(trayRoot);
-    supportSurface.placeOnSupport(trayRoot, 'station-base');
-    supportSurface.registerSupport('metal-tray', trayRoot, meshes);
-  });
+  let trayReady: Promise<void> | undefined;
+  const ensureTrayReady = (): Promise<void> => {
+    trayReady ??= containerFor(MODELS.metalTray).then((container) => {
+      const meshes = attachNormalizedContainerInstance(
+        scene,
+        trayRoot,
+        container,
+        MODELS.metalTray,
+        {
+          orientation: 'flat',
+          alignment: 'base',
+          metric: 'footprint',
+          targetSize: METAL_TRAY_TARGET_FOOTPRINT,
+          pickable: false,
+        },
+      );
+      trayFallback.setEnabled(false);
+      return meshes;
+    }).catch((error) => {
+      console.warn('Falha ao carregar metal_tray.glb; usando bandeja provisória.', error);
+      return [trayFallback];
+    }).then((meshes) => {
+      supportSurface.invalidateObjectBounds(trayRoot);
+      supportSurface.placeOnSupport(trayRoot, 'station-base');
+      supportSurface.registerSupport('metal-tray', trayRoot, meshes);
+    });
+    return trayReady;
+  };
 
   // Anatomia provisória: somente perna/tornozelo, sem o antigo pé em caixa.
   const lowerLeg = MeshBuilder.CreateCapsule(
@@ -568,12 +577,18 @@ export function createWorkspace(scene: Scene): Workspace {
   const bottle = new Mesh('solution-bottle', scene);
   bottle.parent = root;
   setObjectId(bottle, 'solution-bottle');
+  const solutionPourPivot = new TransformNode('solution-pour-pivot', scene);
+  solutionPourPivot.parent = bottle;
+  solutionPourPivot.position.y = MEDICINE_JAR_TARGET_HEIGHT / 2;
+  const solutionVisualRoot = new TransformNode('solution-visual-root', scene);
+  solutionVisualRoot.parent = solutionPourPivot;
+  solutionVisualRoot.position.y = -MEDICINE_JAR_TARGET_HEIGHT / 2;
   const bottleFallbackBody = MeshBuilder.CreateCylinder(
     'solution-bottle-fallback-body',
     { height: 0.105, diameter: 0.042, tessellation: 24 },
     scene,
   );
-  bottleFallbackBody.parent = bottle;
+  bottleFallbackBody.parent = solutionVisualRoot;
   bottleFallbackBody.position.y = 0.0525;
   bottleFallbackBody.material = material(scene, 'bottle-fallback-material', '#69a9bd', 0.3);
   bottleFallbackBody.isPickable = true;
@@ -582,7 +597,7 @@ export function createWorkspace(scene: Scene): Workspace {
     { height: 0.024, diameter: 0.025, tessellation: 20 },
     scene,
   );
-  bottleFallbackCap.parent = bottle;
+  bottleFallbackCap.parent = solutionVisualRoot;
   bottleFallbackCap.position.y = 0.116;
   bottleFallbackCap.material = material(scene, 'cap-fallback-material', '#e8f5f2', 0.4);
   bottleFallbackCap.isPickable = true;
@@ -667,78 +682,81 @@ export function createWorkspace(scene: Scene): Workspace {
     Color3.FromHexString('#0d0d0b'),
   );
 
-  const bottleReady = attachNormalizedGlb(scene, bottle, MODELS.medicineJar, {
-    orientation: 'upright',
-    alignment: 'base',
-    metric: 'height',
-    targetSize: MEDICINE_JAR_TARGET_HEIGHT,
-    pickable: true,
-  }).then(() => {
-    bottleFallbackBody.setEnabled(false);
-    bottleFallbackCap.setEnabled(false);
-  }).catch((error) => {
-    console.warn('Falha ao carregar old_medicine_jar.glb; usando frasco provisório.', error);
-  });
+  const propReady = new Map<ObjectId, Promise<void>>([
+    ['debrisoft-pad', Promise.resolve()],
+  ]);
+  const ensurePropReady = (id: ObjectId): Promise<void> => {
+    const existing = propReady.get(id);
+    if (existing) return existing;
 
-  const gauzeReady = attachNormalizedGlb(scene, gauze, MODELS.gauze, {
-    orientation: 'flat',
-    alignment: 'center',
-    metric: 'footprint',
-    targetSize: GAUZE_TARGET_SIZE,
-    pickable: true,
-  }).then(() => {
-    gauzeFallback.setEnabled(false);
-  }).catch((error) => {
-    console.warn('Falha ao carregar gauze_10x10cm.glb; usando gaze provisória.', error);
-  });
+    const rootForId = pickables.get(id)!;
+    const visualRootForId = id === 'solution-bottle' ? solutionVisualRoot : rootForId;
+    const definition = id === 'solution-bottle'
+      ? {
+          filename: MODELS.medicineJar,
+          options: {
+            orientation: 'upright', alignment: 'base', metric: 'height',
+            targetSize: MEDICINE_JAR_TARGET_HEIGHT, pickable: true,
+          } satisfies AssetVisualOptions,
+        }
+      : id === 'gauze'
+        ? {
+            filename: MODELS.gauze,
+            options: {
+              orientation: 'flat', alignment: 'center', metric: 'footprint',
+              targetSize: GAUZE_TARGET_SIZE, pickable: true,
+            } satisfies AssetVisualOptions,
+          }
+        : id === 'tape-strip'
+          ? {
+              filename: MODELS.tapeRoll,
+              options: {
+                orientation: 'roll-side', alignment: 'center', metric: 'max',
+                targetSize: TAPE_ROLL_TARGET_SIZE, pickable: true,
+              } satisfies AssetVisualOptions,
+            }
+          : {
+              filename: MODELS.bandageRoll,
+              options: {
+                orientation: 'roll-side', alignment: 'center', metric: 'max',
+                targetSize: BANDAGE_ROLL_TARGET_SIZE, pickable: true,
+              } satisfies AssetVisualOptions,
+            };
 
-  const tapeReady = attachNormalizedGlb(scene, tapeRoll, MODELS.tapeRoll, {
-    orientation: 'roll-side',
-    alignment: 'center',
-    metric: 'max',
-    targetSize: TAPE_ROLL_TARGET_SIZE,
-    pickable: true,
-  }).then(() => {
-    tapeFallback.setEnabled(false);
-  }).catch((error) => {
-    console.warn('Falha ao carregar tape_roll_medical.glb; usando rolo provisório.', error);
-  });
-
-  const bandageRollsReady = SceneLoader.LoadAssetContainerAsync(MODEL_ROOT, MODELS.bandageRoll, scene)
-    .then((container) => {
-      const options: AssetVisualOptions = {
-        orientation: 'roll-side',
-        alignment: 'center',
-        metric: 'max',
-        targetSize: BANDAGE_ROLL_TARGET_SIZE,
-        pickable: true,
-      };
-      attachNormalizedContainerInstance(
+    const pending = containerFor(definition.filename).then((container) => {
+      const meshes = attachNormalizedContainerInstance(
         scene,
-        bandage1,
+        visualRootForId,
         container,
-        `${MODELS.bandageRoll}-bandage-1`,
-        options,
+        `${definition.filename}-${id}`,
+        definition.options,
       );
-      const bandage2Meshes = attachNormalizedContainerInstance(
-        scene,
-        bandage2,
-        container,
-        `${MODELS.bandageRoll}-bandage-2`,
-        options,
-      );
-      for (const mesh of bandage2Meshes) {
-        if (!(mesh.material instanceof PBRMaterial)) continue;
-        const tintedMaterial = mesh.material.clone(`${mesh.material.name}-bandage-2`);
-        tintedMaterial.albedoColor = Color3.FromHexString('#b89a72');
-        mesh.material = tintedMaterial;
+      if (id === 'solution-bottle') {
+        bottleFallbackBody.setEnabled(false);
+        bottleFallbackCap.setEnabled(false);
+      } else if (id === 'gauze') {
+        gauzeFallback.setEnabled(false);
+      } else if (id === 'tape-strip') {
+        tapeFallback.setEnabled(false);
+      } else {
+        (id === 'bandage-1' ? bandage1Fallback : bandage2Fallback).setEnabled(false);
       }
-      bandage1Fallback.setEnabled(false);
-      bandage2Fallback.setEnabled(false);
-    })
-    .catch((error) => {
-      console.warn('Falha ao carregar a_roll_of_gauze.glb; usando rolos provisórios.', error);
+      if (id === 'bandage-2') {
+        for (const mesh of meshes) {
+          if (!(mesh.material instanceof PBRMaterial)) continue;
+          const tintedMaterial = mesh.material.clone(`${mesh.material.name}-bandage-2`);
+          tintedMaterial.albedoColor = Color3.FromHexString('#b89a72');
+          mesh.material = tintedMaterial;
+        }
+      }
+      supportSurface.invalidateObjectBounds(rootForId);
+    }).catch((error) => {
+      console.warn(`Falha ao carregar ${definition.filename}; usando prop provisório.`, error);
     });
+
+    propReady.set(id, pending);
+    return pending;
+  };
 
   // Âncoras mutáveis: Interaction mantém as mesmas referências e recebe as posições
   // recalculadas quando o GLB anatômico real termina de carregar.
@@ -1090,41 +1108,87 @@ export function createWorkspace(scene: Scene): Workspace {
 
   const setGauzeApplied = (applied: boolean) => {
     gauzeApplied.setEnabled(applied);
-    gauze.setEnabled(!applied);
+    if (applied) gauze.setEnabled(false);
   };
 
+  let gameMode: GameMode = 'inventory';
+  const inventoryActive = new Set<ObjectId>();
   let supportsCalibrated = false;
-  const placeStoredProps = () => {
-    for (const mesh of pickables.values()) {
+  const placeStoredProps = (objects?: ReadonlyMap<ObjectId, ActivityObjectState>) => {
+    for (const [id, mesh] of pickables) {
+      const state = objects?.get(id)?.state;
+      if (id === 'debrisoft-pad' && (state === 'positioned' || state === 'wet')) continue;
+      if (!mesh.isEnabled(false)) continue;
       supportSurface.invalidateObjectBounds(mesh);
       supportSurface.placeOnSupport(mesh, 'metal-tray');
     }
   };
 
+  const syncObjectVisibility = (
+    objects: ReadonlyMap<ObjectId, ActivityObjectState>,
+  ) => {
+    base.setEnabled(gameMode === 'tabletop');
+    trayRoot.setEnabled(gameMode === 'tabletop');
+    for (const [id, mesh] of pickables) {
+      const state = objects.get(id)?.state ?? 'available';
+      const remainsClinicallyPlaced = id === 'debrisoft-pad'
+        && (state === 'positioned' || state === 'wet');
+      const availableOnTable = state !== 'completed' && !(id === 'gauze' && state === 'applied');
+      mesh.visibility = 1;
+      mesh.setEnabled(gameMode === 'tabletop'
+        ? availableOnTable
+        : inventoryActive.has(id) || remainsClinicallyPlaced);
+    }
+  };
+
+  const setInventoryPropActive = (id: ObjectId, active: boolean) => {
+    if (active) inventoryActive.add(id);
+    else inventoryActive.delete(id);
+    if (gameMode === 'inventory') pickables.get(id)!.setEnabled(active);
+  };
+
   const resetObjects = () => {
+    inventoryActive.clear();
     for (const [id, mesh] of pickables) {
       const pose = OBJECT_INITIAL_POSES[id];
       mesh.position.set(...pose.position);
       mesh.rotationQuaternion = null;
       mesh.rotation.set(...pose.rotation);
       mesh.visibility = 1;
-      mesh.setEnabled(true);
+      mesh.setEnabled(gameMode === 'tabletop');
     }
     if (supportsCalibrated) placeStoredProps();
+    base.setEnabled(gameMode === 'tabletop');
+    trayRoot.setEnabled(gameMode === 'tabletop');
     setGauzeApplied(false);
     resetTapeStrips();
   };
 
-  const supportReady = Promise.all([
-    trayReady,
-    bottleReady,
-    gauzeReady,
-    tapeReady,
-    bandageRollsReady,
-  ]).then(() => {
-    supportsCalibrated = true;
-    placeStoredProps();
-  });
+  let tabletopReady: Promise<void> | undefined;
+  const prepareTabletop = (): Promise<void> => {
+    tabletopReady ??= Promise.all([
+      ensureTrayReady(),
+      ...Array.from(pickables.keys(), (id) => ensurePropReady(id)),
+    ]).then(() => {
+      supportsCalibrated = true;
+    });
+    return tabletopReady;
+  };
+
+  const setGameMode = async (
+    mode: GameMode,
+    objects: ReadonlyMap<ObjectId, ActivityObjectState>,
+  ): Promise<void> => {
+    if (mode === 'tabletop') {
+      base.setEnabled(true);
+      trayRoot.setEnabled(true);
+      await prepareTabletop();
+    }
+    gameMode = mode;
+    inventoryActive.clear();
+    syncObjectVisibility(objects);
+    if (gameMode === 'tabletop' && supportsCalibrated) placeStoredProps(objects);
+  };
 
   let legVisualRoot: TransformNode | undefined;
   const anatomyReady = SceneLoader.ImportMeshAsync('', MODEL_ROOT, MODELS.anatomy, scene)
@@ -1208,12 +1272,18 @@ export function createWorkspace(scene: Scene): Workspace {
     anatomySurface,
     anatomyReady,
     supportSurface,
-    supportReady,
+    get supportReady() {
+      return prepareTabletop();
+    },
+    get gameMode() {
+      return gameMode;
+    },
     placementIndicator: indicator,
     pickables,
     treatmentSurface: treatment,
     treatmentSnap,
     solutionZone,
+    solutionPourPivot,
     tapeApplicationArea,
     tapeAppliedStrips,
     bandageZones,
@@ -1221,6 +1291,10 @@ export function createWorkspace(scene: Scene): Workspace {
     bandageLayerSegments,
     resetTapeStrips,
     setGauzeApplied,
+    ensurePropReady,
+    setGameMode,
+    setInventoryPropActive,
+    syncObjectVisibility,
     resetObjects,
   };
 }
